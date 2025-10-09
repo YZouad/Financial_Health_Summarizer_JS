@@ -1,0 +1,1617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SEC Financial Analyzer</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #000;
+      color: #fff;
+      overflow-x: hidden;
+    }
+
+    body::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    body::-webkit-scrollbar-track {
+      background: #0a0a0a;
+    }
+
+    body::-webkit-scrollbar-thumb {
+      background: #222;
+      border-radius: 4px;
+    }
+
+    body::-webkit-scrollbar-thumb:hover {
+      background: #333;
+    }
+
+    .section-divider {
+      border-left: 1px solid #222;
+      padding-left: 24px;
+      transition: border-color 0.3s;
+    }
+
+    .section-divider:hover {
+      border-left-color: #333;
+    }
+
+    .metric-card {
+      background: rgba(10, 10, 10, 0.5);
+      border: 1px solid #1a1a1a;
+      transition: all 0.3s ease;
+    }
+
+    .metric-card:hover {
+      border-color: #2a2a2a;
+      background: rgba(15, 15, 15, 0.5);
+    }
+
+    .expandable-section {
+      border-left: 1px solid #222;
+      transition: border-color 0.3s;
+      cursor: pointer;
+    }
+
+    .expandable-section:hover {
+      border-left-color: #333;
+    }
+
+    .expand-icon {
+      width: 10px;
+      height: 10px;
+      border-right: 2px solid #666;
+      border-bottom: 2px solid #666;
+      transform: rotate(45deg);
+      transition: all 0.3s ease;
+      margin-top: -3px;
+    }
+
+    .expandable-section.expanded .expand-icon {
+      transform: rotate(-135deg);
+      margin-top: 3px;
+    }
+
+    .status-good { color: #10b981; }
+    .status-neutral { color: #f59e0b; }
+    .status-poor { color: #ef4444; }
+
+    input:focus, select:focus, button:focus {
+      outline: none;
+      border-color: #444 !important;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    function FinancialAnalyzer() {
+    const [ticker, setTicker] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
+    const [companyData, setCompanyData] = useState(null);
+    const [availableYears, setAvailableYears] = useState([]);
+    const [selectedYear, setSelectedYear] = useState('');
+    const [analysis, setAnalysis] = useState(null);
+    const [yearComparison, setYearComparison] = useState(null);
+    const [showDataSources, setShowDataSources] = useState(false);
+    
+    // User credentials
+    const [showCredentialsModal, setShowCredentialsModal] = useState(true);
+    const [userOrg, setUserOrg] = useState('');
+    const [userEmail, setUserEmail] = useState('');
+    const [credentialsSet, setCredentialsSet] = useState(false);
+    const [userAgent, setUserAgent] = useState('');
+    
+    const chartsRef = useRef({});
+
+    // Check if credentials are already set (in memory)
+    useEffect(() => {
+        if (userAgent) {
+        setCredentialsSet(true);
+        setShowCredentialsModal(false);
+        }
+    }, [userAgent]);
+
+    const handleSetCredentials = () => {
+        if (!userOrg.trim() || !userEmail.trim()) {
+        setError('Please provide both organization and email');
+        return;
+        }
+        
+        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailPattern.test(userEmail)) {
+        setError('Please provide a valid email address');
+        return;
+        }
+        
+        const ua = `${userOrg.trim()} ${userEmail.trim()}`;
+        setUserAgent(ua);
+        setCredentialsSet(true);
+        setShowCredentialsModal(false);
+        setError('');
+    };
+
+    const formatNumber = (num) => {
+        if (num === null || num === undefined || isNaN(num)) return 'N/A';
+        if (Math.abs(num) >= 1e9) return `$${(num / 1e9).toFixed(2)}B`;
+        if (Math.abs(num) >= 1e6) return `$${(num / 1e6).toFixed(2)}M`;
+        if (Math.abs(num) >= 1e3) return `$${(num / 1e3).toFixed(2)}K`;
+        return `$${num.toFixed(2)}`;
+    };
+
+    const formatPercent = (num) => {
+        if (num === null || num === undefined || isNaN(num)) return 'N/A';
+        return `${num.toFixed(2)}%`;
+    };
+
+    const formatRatio = (num) => {
+        if (num === null || num === undefined || isNaN(num)) return 'N/A';
+        return num.toFixed(2);
+    };
+
+    const getCIKFromTicker = async (tickerSymbol) => {
+        const apiUrl = 'http://localhost:3000/api/company-tickers';
+        const response = await fetch(apiUrl, {
+        headers: {
+            'X-User-Agent': userAgent
+        }
+        });
+        if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || 'Failed to fetch company list');
+        }
+        const data = await response.json();
+        const company = Object.values(data).find(
+        c => c.ticker && c.ticker.toLowerCase() === tickerSymbol.toLowerCase()
+        );
+        return company ? String(company.cik_str).padStart(10, '0') : null;
+    };
+
+      const getAvailableYears = (facts) => {
+        const years = new Set();
+        const revenueConcepts = ['Revenues', 'RevenueFromContractWithCustomerExcludingAssessedTax', 'SalesRevenueNet'];
+        
+        for (const concept of revenueConcepts) {
+          if (facts[concept] && facts[concept].units['USD']) {
+            const data = facts[concept].units['USD'];
+            data.forEach(item => {
+              if (item.fy && (item.form === '10-K' || item.form === '10-K/A' || item.fp === 'FY')) {
+                years.add(item.fy);
+              }
+            });
+          }
+        }
+        return Array.from(years).sort((a, b) => b - a);
+      };
+
+      const getValueForYear = (facts, concept, year, units = 'USD') => {
+        if (!facts || !facts[concept]) return null;
+        const unitData = facts[concept].units[units] || facts[concept].units['shares'];
+        if (!unitData || !Array.isArray(unitData)) return null;
+        
+        const yearData = unitData.filter(item => 
+          item.fy === year && 
+          (item.form === '10-K' || item.form === '10-K/A' || item.fp === 'FY')
+        );
+        
+        if (yearData.length === 0) return null;
+        yearData.sort((a, b) => new Date(b.end) - new Date(a.end));
+        return yearData[0];
+      };
+
+      // Helper to try multiple concept names and return the first found, with metadata
+      const getValueWithFallback = (facts, concepts, year, units = 'USD') => {
+        for (const concept of concepts) {
+          const value = getValueForYear(facts, concept, year, units);
+          if (value) {
+            return { ...value, concept, confidence: 'high' };
+          }
+        }
+        return { val: null, concept: 'none', confidence: 'none' };
+      };
+
+      const calculateMetricsForYear = (facts, year) => {
+        // Track data sources for transparency
+        const dataSources = {};
+        
+        // Income Statement - try multiple concepts
+        const revenue = getValueWithFallback(facts, [
+          'Revenues',
+          'RevenueFromContractWithCustomerExcludingAssessedTax',
+          'SalesRevenueNet',
+          'RevenueFromContractWithCustomerIncludingAssessedTax'
+        ], year);
+        dataSources.revenue = revenue.concept;
+        
+        const costOfRevenue = getValueWithFallback(facts, [
+          'CostOfRevenue',
+          'CostOfGoodsAndServicesSold',
+          'CostOfGoodsSold'
+        ], year);
+        dataSources.costOfRevenue = costOfRevenue.concept;
+        
+        const grossProfit = getValueWithFallback(facts, ['GrossProfit'], year);
+        dataSources.grossProfit = grossProfit.concept;
+        
+        const operatingIncome = getValueWithFallback(facts, [
+          'OperatingIncomeLoss',
+          'IncomeLossFromOperations'
+        ], year);
+        dataSources.operatingIncome = operatingIncome.concept;
+        
+        const netIncome = getValueWithFallback(facts, [
+          'NetIncomeLoss',
+          'ProfitLoss'
+        ], year);
+        dataSources.netIncome = netIncome.concept;
+        
+        const operatingExpenses = getValueWithFallback(facts, [
+          'OperatingExpenses',
+          'CostsAndExpenses'
+        ], year);
+        
+        const researchDevelopment = getValueWithFallback(facts, [
+          'ResearchAndDevelopmentExpense'
+        ], year);
+        
+        const sellingGeneralAdmin = getValueWithFallback(facts, [
+          'SellingGeneralAndAdministrativeExpense'
+        ], year);
+        
+        const interestExpense = getValueWithFallback(facts, [
+          'InterestExpense',
+          'InterestExpenseDebt'
+        ], year);
+        
+        const taxExpense = getValueWithFallback(facts, [
+          'IncomeTaxExpenseBenefit',
+          'IncomeTaxesPaid'
+        ], year);
+        
+        // Balance Sheet
+        const totalAssets = getValueWithFallback(facts, ['Assets'], year);
+        dataSources.totalAssets = totalAssets.concept;
+        
+        const currentAssets = getValueWithFallback(facts, ['AssetsCurrent'], year);
+        dataSources.currentAssets = currentAssets.concept;
+        
+        const cash = getValueWithFallback(facts, [
+          'CashAndCashEquivalentsAtCarryingValue',
+          'Cash',
+          'CashCashEquivalentsAndShortTermInvestments'
+        ], year);
+        
+        const inventories = getValueWithFallback(facts, [
+          'InventoryNet',
+          'Inventory'
+        ], year);
+        
+        const accountsReceivable = getValueWithFallback(facts, [
+          'AccountsReceivableNetCurrent',
+          'AccountsReceivableNet'
+        ], year);
+        
+        const totalLiabilities = getValueWithFallback(facts, ['Liabilities'], year);
+        dataSources.totalLiabilities = totalLiabilities.concept;
+        
+        const currentLiabilities = getValueWithFallback(facts, ['LiabilitiesCurrent'], year);
+        dataSources.currentLiabilities = currentLiabilities.concept;
+        
+        // IMPROVED DEBT CALCULATION - Only interest-bearing debt : to come back to : Revise again
+        const longTermDebt = getValueWithFallback(facts, [
+          'LongTermDebt',
+          'LongTermDebtNoncurrent',
+          'LongTermDebtAndCapitalLeaseObligations'
+        ], year);
+        dataSources.longTermDebt = longTermDebt.concept;
+        
+        const shortTermDebt = getValueWithFallback(facts, [
+          'DebtCurrent',
+          'ShortTermBorrowings',
+          'CommercialPaper'
+        ], year);
+        dataSources.shortTermDebt = shortTermDebt.concept;
+        
+        // Calculate total interest-bearing debt
+        const totalDebt = (longTermDebt?.val || 0) + (shortTermDebt?.val || 0);
+        
+        const stockholdersEquity = getValueWithFallback(facts, [
+          'StockholdersEquity',
+          'ShareholdersEquity'
+        ], year);
+        dataSources.stockholdersEquity = stockholdersEquity.concept;
+        
+        // Cash Flow
+        const operatingCashFlow = getValueWithFallback(facts, [
+          'NetCashProvidedByUsedInOperatingActivities'
+        ], year);
+        dataSources.operatingCashFlow = operatingCashFlow.concept;
+        
+        const investingCashFlow = getValueWithFallback(facts, [
+          'NetCashProvidedByUsedInInvestingActivities'
+        ], year);
+        
+        const financingCashFlow = getValueWithFallback(facts, [
+          'NetCashProvidedByUsedInFinancingActivities'
+        ], year);
+        
+        const capex = getValueWithFallback(facts, [
+          'PaymentsToAcquirePropertyPlantAndEquipment',
+          'CapitalExpenditures'
+        ], year);
+        dataSources.capex = capex.concept;
+        
+        const dividendsPaid = getValueWithFallback(facts, [
+          'PaymentsOfDividends',
+          'DividendsPaid'
+        ], year);
+        
+        // Shares
+        const commonShares = getValueWithFallback(facts, [
+          'CommonStockSharesOutstanding',
+          'SharesOutstanding'
+        ], year, 'shares');
+        dataSources.shares = commonShares.concept;
+        
+        // Extract values
+        const revenueVal = revenue?.val || 0;
+        const costOfRevenueVal = costOfRevenue?.val || 0;
+        
+        // Calculate or use reported gross profit
+        let grossProfitVal = grossProfit?.val;
+        let grossProfitCalculated = false;
+        if (!grossProfitVal && revenueVal && costOfRevenueVal) {
+          grossProfitVal = revenueVal - costOfRevenueVal;
+          grossProfitCalculated = true;
+        }
+        
+        const operatingIncomeVal = operatingIncome?.val || 0;
+        const netIncomeVal = netIncome?.val || 0;
+        const interestExpenseVal = interestExpense?.val || 0;
+        const taxExpenseVal = taxExpense?.val || 0;
+        
+        // Calculate EBIT (Earnings Before Interest & Taxes)
+        let ebitVal = netIncomeVal + interestExpenseVal + taxExpenseVal;
+        
+        const totalAssetsVal = totalAssets?.val || 0;
+        const currentAssetsVal = currentAssets?.val || 0;
+        const cashVal = cash?.val || 0;
+        const inventoriesVal = inventories?.val || 0;
+        const accountsReceivableVal = accountsReceivable?.val || 0;
+        
+        const totalLiabilitiesVal = totalLiabilities?.val || 0;
+        const currentLiabilitiesVal = currentLiabilities?.val || 0;
+        const longTermDebtVal = longTermDebt?.val || 0;
+        const shortTermDebtVal = shortTermDebt?.val || 0;
+        const totalDebtVal = totalDebt;
+        
+        const equityVal = stockholdersEquity?.val || 0;
+        
+        const ocfVal = operatingCashFlow?.val || 0;
+        const investingCfVal = investingCashFlow?.val || 0;
+        const financingCfVal = financingCashFlow?.val || 0;
+        const capexVal = Math.abs(capex?.val || 0);
+        const dividendsVal = Math.abs(dividendsPaid?.val || 0);
+        
+        const sharesVal = commonShares?.val || 0;
+
+        // Calculate ALL the metrics
+        // Profitability Ratios
+        const grossMargin = revenueVal !== 0 && grossProfitVal ? (grossProfitVal / revenueVal) * 100 : null;
+        const operatingMargin = revenueVal !== 0 ? (operatingIncomeVal / revenueVal) * 100 : null;
+        const netMargin = revenueVal !== 0 ? (netIncomeVal / revenueVal) * 100 : null;
+        const roe = equityVal !== 0 ? (netIncomeVal / equityVal) * 100 : null;
+        const roa = totalAssetsVal !== 0 ? (netIncomeVal / totalAssetsVal) * 100 : null;
+        
+        // ROIC = NOPAT / Invested Capital
+        // NOPAT = Operating Income * (1 - Tax Rate)
+        // Invested Capital = Debt + Equity
+        const taxRate = (netIncomeVal + taxExpenseVal) !== 0 ? taxExpenseVal / (netIncomeVal + taxExpenseVal) : 0.21;
+        const nopat = operatingIncomeVal * (1 - taxRate);
+        const investedCapital = totalDebtVal + equityVal;
+        const roic = investedCapital !== 0 ? (nopat / investedCapital) * 100 : null;
+        
+        // Liquidity Ratios
+        const currentRatio = currentLiabilitiesVal !== 0 ? currentAssetsVal / currentLiabilitiesVal : null;
+        const quickRatio = currentLiabilitiesVal !== 0 ? (currentAssetsVal - inventoriesVal) / currentLiabilitiesVal : null;
+        const cashRatio = currentLiabilitiesVal !== 0 ? cashVal / currentLiabilitiesVal : null;
+        
+        // Leverage Ratios - Using interest-bearing debt only
+        const debtToEquity = equityVal !== 0 ? totalDebtVal / equityVal : null;
+        const debtToAssets = totalAssetsVal !== 0 ? totalDebtVal / totalAssetsVal : null;
+        const equityMultiplier = equityVal !== 0 ? totalAssetsVal / equityVal : null;
+        const interestCoverage = interestExpenseVal !== 0 && ebitVal ? ebitVal / interestExpenseVal : null;
+        
+        // Efficiency Ratios
+        const assetTurnover = totalAssetsVal !== 0 ? revenueVal / totalAssetsVal : null;
+        const inventoryTurnover = inventoriesVal !== 0 ? costOfRevenueVal / inventoriesVal : null;
+        const receivablesTurnover = accountsReceivableVal !== 0 ? revenueVal / accountsReceivableVal : null;
+        const daysSalesOutstanding = receivablesTurnover !== 0 && receivablesTurnover ? 365 / receivablesTurnover : null;
+        const daysInventoryOutstanding = inventoryTurnover !== 0 && inventoryTurnover ? 365 / inventoryTurnover : null;
+        
+        // Cash Flow Metrics
+        const freeCashFlow = ocfVal - capexVal;
+        const fcfMargin = revenueVal !== 0 ? (freeCashFlow / revenueVal) * 100 : null;
+        const ocfToNetIncome = netIncomeVal !== 0 ? ocfVal / netIncomeVal : null;
+        const cashFlowToDebt = totalDebtVal !== 0 ? ocfVal / totalDebtVal : null;
+        
+        // Per Share Metrics
+        const eps = sharesVal !== 0 ? netIncomeVal / sharesVal : null;
+        const bookValuePerShare = sharesVal !== 0 ? equityVal / sharesVal : null;
+        const cashPerShare = sharesVal !== 0 ? cashVal / sharesVal : null;
+        const fcfPerShare = sharesVal !== 0 ? freeCashFlow / sharesVal : null;
+
+        // Data quality score
+        const dataQuality = {
+          score: 0,
+          total: 0,
+          details: {}
+        };
+        
+        const checkDataQuality = (name, hasValue, isCalculated = false) => {
+          dataQuality.total++;
+          if (hasValue) {
+            dataQuality.score++;
+            dataQuality.details[name] = isCalculated ? 'calculated' : 'reported';
+          } else {
+            dataQuality.details[name] = 'missing';
+          }
+        };
+        
+        checkDataQuality('revenue', revenueVal);
+        checkDataQuality('netIncome', netIncomeVal);
+        checkDataQuality('totalAssets', totalAssetsVal);
+        checkDataQuality('stockholdersEquity', equityVal);
+        checkDataQuality('operatingCashFlow', ocfVal);
+        checkDataQuality('grossProfit', grossProfitVal, grossProfitCalculated);
+        checkDataQuality('operatingIncome', operatingIncomeVal);
+        checkDataQuality('debt', totalDebtVal > 0);
+
+        return {
+          periodEnd: revenue?.end || netIncome?.end || 'N/A',
+          fiscalYear: year,
+          dataSources,
+          dataQuality: {
+            ...dataQuality,
+            percentage: (dataQuality.score / dataQuality.total * 100).toFixed(0)
+          },
+          rawValues: {
+            revenue: revenueVal,
+            costOfRevenue: costOfRevenueVal,
+            grossProfit: grossProfitVal,
+            operatingIncome: operatingIncomeVal,
+            netIncome: netIncomeVal,
+            ebit: ebitVal,
+            totalAssets: totalAssetsVal,
+            currentAssets: currentAssetsVal,
+            cash: cashVal,
+            inventories: inventoriesVal,
+            accountsReceivable: accountsReceivableVal,
+            totalLiabilities: totalLiabilitiesVal,
+            currentLiabilities: currentLiabilitiesVal,
+            longTermDebt: longTermDebtVal,
+            shortTermDebt: shortTermDebtVal,
+            totalDebt: totalDebtVal,
+            stockholdersEquity: equityVal,
+            operatingCashFlow: ocfVal,
+            freeCashFlow: freeCashFlow,
+            capex: capexVal,
+            dividends: dividendsVal,
+            shares: sharesVal
+          },
+          profitability: {
+            grossMargin,
+            operatingMargin,
+            netMargin,
+            roe,
+            roa,
+            roic
+          },
+          liquidity: {
+            currentRatio,
+            quickRatio,
+            cashRatio
+          },
+          leverage: {
+            debtToEquity,
+            debtToAssets,
+            equityMultiplier,
+            interestCoverage
+          },
+          efficiency: {
+            assetTurnover,
+            inventoryTurnover,
+            receivablesTurnover,
+            daysSalesOutstanding,
+            daysInventoryOutstanding
+          },
+          cashFlow: {
+            freeCashFlow,
+            fcfMargin,
+            ocfToNetIncome,
+            cashFlowToDebt
+          },
+          perShare: {
+            eps,
+            bookValuePerShare,
+            cashPerShare,
+            fcfPerShare
+          },
+          notes: {
+            grossProfitCalculated,
+            debtDefinition: 'Interest-bearing debt only (excludes accounts payable, accrued expenses, etc.)'
+          }
+        };
+      };
+
+      const analyzeCompany = async () => {
+        if (!credentialsSet) {
+            setShowCredentialsModal(true);
+            setError('Please provide your contact information first');
+            return;
+        }
+
+        if (!ticker.trim()) {
+            setError('Please enter a ticker symbol');
+            return;
+        }
+
+        setLoading(true);
+        setError('');
+        setCompanyData(null);
+        setAvailableYears([]);
+        setSelectedYear('');
+        setAnalysis(null);
+
+        try {
+            const cik = await getCIKFromTicker(ticker.trim());
+            if (!cik) throw new Error('Ticker symbol not found');
+
+            const apiUrl = `http://localhost:3000/api/company-facts/${cik}`;
+            const response = await fetch(apiUrl, {
+            headers: {
+                'X-User-Agent': userAgent
+            }
+            });
+            
+            if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.message || 'Failed to fetch company data');
+            }
+
+            const data = await response.json();
+            const facts = data.facts['us-gaap'];
+            const years = getAvailableYears(facts);
+            
+            if (years.length === 0) throw new Error('No annual financial data found');
+            
+            setCompanyData(data);
+            setAvailableYears(years);
+            setSelectedYear(years[0]);
+            
+            const metrics = calculateMetricsForYear(facts, years[0]);
+            setAnalysis({
+            companyName: data.entityName,
+            ...metrics
+            });
+
+            // Calculate year-over-year comparison if we have multiple years
+            if (years.length > 1) {
+            const prevYearMetrics = calculateMetricsForYear(facts, years[1]);
+            setYearComparison({
+                currentYear: years[0],
+                previousYear: years[1],
+                current: metrics,
+                previous: prevYearMetrics
+            });
+            }
+            
+        } catch (err) {
+            setError(err.message);
+            console.error('Analysis error:', err);
+        } finally {
+            setLoading(false);
+        }
+        };
+
+      const handleYearChange = (year) => {
+        setSelectedYear(year);
+        const facts = companyData.facts['us-gaap'];
+        const metrics = calculateMetricsForYear(facts, parseInt(year));
+        setAnalysis({
+          companyName: companyData.entityName,
+          ...metrics
+        });
+
+        // Update comparison
+        const yearIndex = availableYears.indexOf(parseInt(year));
+        if (yearIndex < availableYears.length - 1) {
+          const prevYear = availableYears[yearIndex + 1];
+          const prevYearMetrics = calculateMetricsForYear(facts, prevYear);
+          setYearComparison({
+            currentYear: parseInt(year),
+            previousYear: prevYear,
+            current: metrics,
+            previous: prevYearMetrics
+          });
+        } else {
+          setYearComparison(null);
+        }
+      };
+
+      const getHealthStatus = (value, thresholds) => {
+        if (value === null || value === undefined || isNaN(value)) return 'neutral';
+        if (value >= thresholds.good) return 'good';
+        if (value >= thresholds.neutral) return 'neutral';
+        return 'poor';
+      };
+
+      const getHealthStatusInverse = (value, thresholds) => {
+        if (value === null || value === undefined || isNaN(value)) return 'neutral';
+        if (value <= thresholds.good) return 'good';
+        if (value <= thresholds.neutral) return 'neutral';
+        return 'poor';
+      };
+
+      const StatusBadge = ({ status }) => {
+        const colors = {
+          good: 'status-good',
+          neutral: 'status-neutral',
+          poor: 'status-poor'
+        };
+        return (
+          <span className={`text-xs font-light tracking-wider uppercase ${colors[status]}`}>
+            {status}
+          </span>
+        );
+      };
+
+      const MetricCard = ({ title, value, format = 'number', status, subtitle, note }) => (
+        <div className="metric-card rounded-lg p-5">
+          <div className="flex items-start justify-between mb-3">
+            <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wider">{title}</h4>
+            {status && <StatusBadge status={status} />}
+          </div>
+          <p className="text-2xl font-light text-white mb-1">
+            {format === 'percent' ? formatPercent(value) : 
+             format === 'ratio' ? formatRatio(value) : 
+             formatNumber(value)}
+          </p>
+          {subtitle && <p className="text-xs text-gray-600 font-light">{subtitle}</p>}
+          {note && <p className="text-xs text-gray-500 mt-1 font-light">{note}</p>}
+        </div>
+      );
+
+      const YoYChange = ({ current, previous, format = 'number' }) => {
+        if (!current || !previous || current === 0 || previous === 0) return <span className="text-gray-400">N/A</span>;
+        const change = ((current - previous) / Math.abs(previous)) * 100;
+        const isPositive = change > 0;
+        return (
+          <span className={isPositive ? 'text-green-500' : 'text-red-500'}>
+            {isPositive ? '↑' : '↓'} {Math.abs(change).toFixed(1)}%
+          </span>
+        );
+      };
+
+      useEffect(() => {
+        if (analysis && availableYears.length > 0) {
+          createTrendCharts();
+        }
+        
+        return () => {
+          Object.values(chartsRef.current).forEach(chart => {
+            if (chart) chart.destroy();
+          });
+        };
+      }, [analysis, availableYears]);
+
+      const createTrendCharts = () => {
+        if (!companyData || availableYears.length < 2) return;
+        
+        const facts = companyData.facts['us-gaap'];
+        const years = availableYears.slice(0, 5).reverse();
+        const multiYearData = years.map(year => calculateMetricsForYear(facts, year));
+        
+        createRevenueChart(years, multiYearData);
+        createMarginsChart(years, multiYearData);
+        createCashFlowChart(years, multiYearData);
+        createRatiosChart(years, multiYearData);
+      };
+
+      const createRevenueChart = (years, data) => {
+        const ctx = document.getElementById('revenue-chart');
+        if (!ctx) return;
+        
+        if (chartsRef.current.revenue) chartsRef.current.revenue.destroy();
+        
+        chartsRef.current.revenue = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: years,
+            datasets: [
+              {
+                label: 'Revenue',
+                data: data.map(d => d.rawValues.revenue / 1e9),
+                borderColor: '#60a5fa',
+                backgroundColor: 'rgba(96, 165, 250, 0.1)',
+                tension: 0.4,
+                fill: true,
+                borderWidth: 2
+              },
+              {
+                label: 'Net Income',
+                data: data.map(d => d.rawValues.netIncome / 1e9),
+                borderColor: '#34d399',
+                backgroundColor: 'rgba(52, 211, 153, 0.1)',
+                tension: 0.4,
+                fill: true,
+                borderWidth: 2
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { 
+                position: 'top',
+                labels: {
+                  color: '#9ca3af',
+                  font: { size: 11, weight: 300 }
+                }
+              },
+              tooltip: {
+                backgroundColor: '#18181b',
+                titleColor: '#fff',
+                bodyColor: '#d1d5db',
+                borderColor: '#27272a',
+                borderWidth: 1,
+                callbacks: {
+                  label: (context) => `${context.dataset.label}: $${context.parsed.y.toFixed(2)}B`
+                }
+              }
+            },
+            scales: {
+              y: {
+                beginAtZero: false,
+                grid: { color: '#27272a' },
+                ticks: {
+                  color: '#9ca3af',
+                  font: { size: 11 },
+                  callback: (value) => `$${value}B`
+                }
+              },
+              x: {
+                grid: { color: '#27272a' },
+                ticks: {
+                  color: '#9ca3af',
+                  font: { size: 11 }
+                }
+              }
+            }
+          }
+        });
+      };
+
+      const createMarginsChart = (years, data) => {
+        const ctx = document.getElementById('margins-chart');
+        if (!ctx) return;
+        
+        if (chartsRef.current.margins) chartsRef.current.margins.destroy();
+        
+        chartsRef.current.margins = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels: years,
+            datasets: [
+              {
+                label: 'Gross Margin',
+                data: data.map(d => d.profitability.grossMargin),
+                backgroundColor: 'rgba(96, 165, 250, 0.5)',
+                borderColor: '#60a5fa',
+                borderWidth: 1
+              },
+              {
+                label: 'Operating Margin',
+                data: data.map(d => d.profitability.operatingMargin),
+                backgroundColor: 'rgba(52, 211, 153, 0.5)',
+                borderColor: '#34d399',
+                borderWidth: 1
+              },
+              {
+                label: 'Net Margin',
+                data: data.map(d => d.profitability.netMargin),
+                backgroundColor: 'rgba(251, 191, 36, 0.5)',
+                borderColor: '#fbbf24',
+                borderWidth: 1
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { 
+                position: 'top',
+                labels: {
+                  color: '#9ca3af',
+                  font: { size: 11, weight: 300 }
+                }
+              },
+              tooltip: {
+                backgroundColor: '#18181b',
+                titleColor: '#fff',
+                bodyColor: '#d1d5db',
+                borderColor: '#27272a',
+                borderWidth: 1,
+                callbacks: {
+                  label: (context) => `${context.dataset.label}: ${context.parsed.y?.toFixed(2)}%`
+                }
+              }
+            },
+            scales: {
+              y: {
+                beginAtZero: true,
+                grid: { color: '#27272a' },
+                ticks: {
+                  color: '#9ca3af',
+                  font: { size: 11 },
+                  callback: (value) => `${value}%`
+                }
+              },
+              x: {
+                grid: { color: '#27272a' },
+                ticks: {
+                  color: '#9ca3af',
+                  font: { size: 11 }
+                }
+              }
+            }
+          }
+        });
+      };
+
+      const createCashFlowChart = (years, data) => {
+        const ctx = document.getElementById('cashflow-chart');
+        if (!ctx) return;
+        
+        if (chartsRef.current.cashflow) chartsRef.current.cashflow.destroy();
+        
+        chartsRef.current.cashflow = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels: years,
+            datasets: [
+              {
+                label: 'Operating CF',
+                data: data.map(d => d.rawValues.operatingCashFlow / 1e9),
+                backgroundColor: 'rgba(52, 211, 153, 0.5)',
+                borderColor: '#34d399',
+                borderWidth: 1
+              },
+              {
+                label: 'Free CF',
+                data: data.map(d => d.rawValues.freeCashFlow / 1e9),
+                backgroundColor: 'rgba(96, 165, 250, 0.5)',
+                borderColor: '#60a5fa',
+                borderWidth: 1
+              },
+              {
+                label: 'CapEx',
+                data: data.map(d => -d.rawValues.capex / 1e9),
+                backgroundColor: 'rgba(239, 68, 68, 0.5)',
+                borderColor: '#ef4444',
+                borderWidth: 1
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { 
+                position: 'top',
+                labels: {
+                  color: '#9ca3af',
+                  font: { size: 11, weight: 300 }
+                }
+              },
+              tooltip: {
+                backgroundColor: '#18181b',
+                titleColor: '#fff',
+                bodyColor: '#d1d5db',
+                borderColor: '#27272a',
+                borderWidth: 1,
+                callbacks: {
+                  label: (context) => `${context.dataset.label}: $${context.parsed.y.toFixed(2)}B`
+                }
+              }
+            },
+            scales: {
+              y: {
+                grid: { color: '#27272a' },
+                ticks: {
+                  color: '#9ca3af',
+                  font: { size: 11 },
+                  callback: (value) => `$${value}B`
+                }
+              },
+              x: {
+                grid: { color: '#27272a' },
+                ticks: {
+                  color: '#9ca3af',
+                  font: { size: 11 }
+                }
+              }
+            }
+          }
+        });
+      };
+
+      const createRatiosChart = (years, data) => {
+        const ctx = document.getElementById('ratios-chart');
+        if (!ctx) return;
+        
+        if (chartsRef.current.ratios) chartsRef.current.ratios.destroy();
+        
+        chartsRef.current.ratios = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: years,
+            datasets: [
+              {
+                label: 'ROE',
+                data: data.map(d => d.profitability.roe),
+                borderColor: '#60a5fa',
+                backgroundColor: 'rgba(96, 165, 250, 0.1)',
+                tension: 0.4,
+                borderWidth: 2,
+                yAxisID: 'y'
+              },
+              {
+                label: 'ROA',
+                data: data.map(d => d.profitability.roa),
+                borderColor: '#34d399',
+                backgroundColor: 'rgba(52, 211, 153, 0.1)',
+                tension: 0.4,
+                borderWidth: 2,
+                yAxisID: 'y'
+              },
+              {
+                label: 'Current Ratio',
+                data: data.map(d => d.liquidity.currentRatio),
+                borderColor: '#fbbf24',
+                backgroundColor: 'rgba(251, 191, 36, 0.1)',
+                tension: 0.4,
+                borderWidth: 2,
+                yAxisID: 'y1'
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+              mode: 'index',
+              intersect: false
+            },
+            plugins: {
+              legend: { 
+                position: 'top',
+                labels: {
+                  color: '#9ca3af',
+                  font: { size: 11, weight: 300 }
+                }
+              },
+              tooltip: {
+                backgroundColor: '#18181b',
+                titleColor: '#fff',
+                bodyColor: '#d1d5db',
+                borderColor: '#27272a',
+                borderWidth: 1
+              }
+            },
+            scales: {
+              y: {
+                type: 'linear',
+                display: true,
+                position: 'left',
+                grid: { color: '#27272a' },
+                ticks: {
+                  color: '#9ca3af',
+                  font: { size: 11 },
+                  callback: (value) => `${value}%`
+                }
+              },
+              y1: {
+                type: 'linear',
+                display: true,
+                position: 'right',
+                grid: {
+                  drawOnChartArea: false
+                },
+                ticks: {
+                  color: '#9ca3af',
+                  font: { size: 11 }
+                }
+              },
+              x: {
+                grid: { color: '#27272a' },
+                ticks: {
+                  color: '#9ca3af',
+                  font: { size: 11 }
+                }
+              }
+            }
+          }
+        });
+      };
+
+      return (
+        <div className="min-h-screen bg-black p-6">
+        {/* Credentials Modal */}
+        {showCredentialsModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-50 p-4">
+            <div className="bg-zinc-950 border border-zinc-800 rounded-lg max-w-md w-full p-8">
+                <h2 className="text-2xl font-light text-white mb-4 tracking-tight">SEC Data Access</h2>
+                <p className="text-gray-400 mb-6 text-sm font-light leading-relaxed">
+                The SEC requires contact information for API access. Your information is only used 
+                to identify your requests to the SEC and is not stored by this application.
+                </p>
+                
+                <div className="space-y-4">
+                <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-2 uppercase tracking-wider">
+                    Organization / Your Name
+                    </label>
+                    <input
+                    type="text"
+                    value={userOrg}
+                    onChange={(e) => setUserOrg(e.target.value)}
+                    placeholder="e.g., Personal Research"
+                    className="w-full px-4 py-3 bg-black border border-zinc-800 rounded text-white placeholder-gray-600 focus:border-zinc-700 transition-colors"
+                    />
+                </div>
+                
+                <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-2 uppercase tracking-wider">
+                    Email Address
+                    </label>
+                    <input
+                    type="email"
+                    value={userEmail}
+                    onChange={(e) => setUserEmail(e.target.value)}
+                    placeholder="your.email@example.com"
+                    className="w-full px-4 py-3 bg-black border border-zinc-800 rounded text-white placeholder-gray-600 focus:border-zinc-700 transition-colors"
+                    />
+                </div>
+                </div>
+
+                {error && showCredentialsModal && (
+                <div className="mt-4 p-3 bg-red-950 border border-red-900 rounded text-red-300 text-sm font-light">
+                    {error}
+                </div>
+                )}
+                
+                <div className="mt-6">
+                <button
+                    onClick={handleSetCredentials}
+                    className="w-full px-6 py-3 bg-white text-black rounded hover:bg-gray-200 transition-colors font-light tracking-wide"
+                >
+                    Continue
+                </button>
+                </div>
+                
+                <p className="text-xs text-gray-600 mt-4 font-light leading-relaxed">
+                By continuing, you acknowledge that the SEC requires this information and 
+                agree to comply with their fair access policy (max 10 requests/second).
+                </p>
+            </div>
+            </div>
+        )}
+
+        <div className="max-w-7xl mx-auto">
+            {/* Header */}
+            <div className="mb-12">
+            <h1 className="text-5xl font-light text-white mb-3 tracking-tight">
+                SEC Financial Analyzer
+            </h1>
+            <p className="text-gray-500 font-light">Comprehensive financial metrics from SEC EDGAR filings</p>
+            {credentialsSet && (
+                <p className="text-xs text-gray-600 mt-2 font-light">
+                Accessing as: {userOrg} • {' '}
+                <button 
+                    onClick={() => setShowCredentialsModal(true)}
+                    className="text-gray-400 hover:text-white underline transition-colors"
+                >
+                    Change
+                </button>
+                </p>
+            )}
+            </div>
+
+            {/* Search Bar */}
+            <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-8">
+              <div className="flex gap-3">
+                <input
+                  type="text"
+                  value={ticker}
+                  onChange={(e) => setTicker(e.target.value.toUpperCase())}
+                  onKeyPress={(e) => e.key === 'Enter' && analyzeCompany()}
+                  placeholder="Enter ticker (e.g., AAPL, MSFT, GOOGL)"
+                  className="flex-1 px-4 py-3 bg-black border border-zinc-800 rounded text-white placeholder-gray-600 focus:border-zinc-700 transition-colors"
+                />
+                <button
+                  onClick={analyzeCompany}
+                  disabled={loading}
+                  className="px-8 py-3 bg-white text-black rounded hover:bg-gray-200 disabled:bg-zinc-800 disabled:text-gray-600 transition-colors font-light tracking-wide"
+                >
+                  {loading ? 'Analyzing...' : 'Analyze'}
+                </button>
+              </div>
+
+              {availableYears.length > 0 && (
+                <div className="mt-4 flex items-center gap-3 flex-wrap">
+                  <label className="text-xs uppercase tracking-wider text-gray-500 font-medium">Fiscal Year:</label>
+                  <select
+                    value={selectedYear}
+                    onChange={(e) => handleYearChange(e.target.value)}
+                    className="px-4 py-2 bg-black border border-zinc-800 rounded text-white focus:border-zinc-700 transition-colors"
+                  >
+                    {availableYears.map(year => (
+                      <option key={year} value={year}>{year}</option>
+                    ))}
+                  </select>
+                  <span className="text-sm text-gray-600 font-light">
+                    ({availableYears.length} years available)
+                  </span>
+                  <button
+                    onClick={() => setShowDataSources(!showDataSources)}
+                    className="ml-auto px-4 py-2 text-sm bg-zinc-900 hover:bg-zinc-800 text-gray-400 rounded transition-colors font-light"
+                  >
+                    {showDataSources ? 'Hide' : 'Show'} Data Sources
+                  </button>
+                </div>
+              )}
+
+              {error && (
+                <div className="mt-4 p-4 bg-red-950 border border-red-900 rounded flex items-center gap-2 text-red-300 font-light">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <span>{error}</span>
+                </div>
+              )}
+            </div>
+
+            {analysis && (
+              <>
+                {/* Company Header with Data Quality */}
+                <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-8">
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <h2 className="text-3xl font-light text-white mb-2 tracking-tight">{analysis.companyName}</h2>
+                      <p className="text-gray-500 font-light text-sm">
+                        Fiscal Year {analysis.fiscalYear} • Period Ending: {analysis.periodEnd}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <div className="flex items-center gap-2 justify-end">
+                        <span className="text-xs text-gray-500 uppercase tracking-wider">Data Quality:</span>
+                        <div className="flex items-center gap-2">
+                          <div className="w-24 bg-zinc-800 rounded-full h-1.5">
+                            <div 
+                              className={`h-1.5 rounded-full ${
+                                parseInt(analysis.dataQuality.percentage) >= 80 ? 'bg-green-600' :
+                                parseInt(analysis.dataQuality.percentage) >= 60 ? 'bg-yellow-600' : 'bg-red-600'
+                              }`}
+                              style={{ width: `${analysis.dataQuality.percentage}%` }}
+                            ></div>
+                          </div>
+                          <span className="text-sm font-light text-white">{analysis.dataQuality.percentage}%</span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-gray-600 mt-2 font-light">
+                        {analysis.dataQuality.score}/{analysis.dataQuality.total} key metrics available
+                      </p>
+                    </div>
+                  </div>
+                  
+                  {/* Important Note about Debt */}
+                  <div className="mt-4 p-3 bg-zinc-900 border border-zinc-800 rounded">
+                    <p className="text-sm text-gray-400 font-light">
+                      <strong className="text-gray-300">Note:</strong> {analysis.notes.debtDefinition}
+                      {analysis.notes.grossProfitCalculated && " | Gross Profit calculated from Revenue - Cost of Revenue."}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Data Sources Panel */}
+                {showDataSources && (
+                  <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-8">
+                    <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-4">Data Sources (XBRL Concepts)</h3>
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 text-sm">
+                      {Object.entries(analysis.dataSources).map(([key, value]) => (
+                        <div key={key} className="p-2 bg-black border border-zinc-900 rounded">
+                          <span className="font-light text-gray-400">{key}:</span>
+                          <br />
+                          <span className="text-gray-600 text-xs font-light">{value || 'N/A'}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Key Financials Overview */}
+                <div className="mb-8 section-divider">
+                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Key Financial Statements</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <MetricCard title="Revenue" value={analysis.rawValues.revenue} />
+                    <MetricCard 
+                      title="Gross Profit" 
+                      value={analysis.rawValues.grossProfit}
+                      note={analysis.notes.grossProfitCalculated ? "Calculated" : "Reported"}
+                    />
+                    <MetricCard title="Operating Income" value={analysis.rawValues.operatingIncome} />
+                    <MetricCard title="Net Income" value={analysis.rawValues.netIncome} />
+                    <MetricCard title="Total Assets" value={analysis.rawValues.totalAssets} />
+                    <MetricCard 
+                      title="Total Debt (Interest-bearing)" 
+                      value={analysis.rawValues.totalDebt}
+                      subtitle={`LT: ${formatNumber(analysis.rawValues.longTermDebt)} + ST: ${formatNumber(analysis.rawValues.shortTermDebt)}`}
+                    />
+                    <MetricCard title="Stockholders Equity" value={analysis.rawValues.stockholdersEquity} />
+                    <MetricCard title="Cash & Equivalents" value={analysis.rawValues.cash} />
+                  </div>
+                </div>
+
+                {/* Profitability Metrics */}
+                <div className="mb-8 section-divider">
+                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Profitability Metrics</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <MetricCard 
+                      title="Gross Margin" 
+                      value={analysis.profitability.grossMargin} 
+                      format="percent"
+                      status={getHealthStatus(analysis.profitability.grossMargin, {good: 40, neutral: 25})}
+                      note={analysis.notes.grossProfitCalculated ? "Calculated from Revenue - COGS" : undefined}
+                    />
+                    <MetricCard 
+                      title="Operating Margin" 
+                      value={analysis.profitability.operatingMargin} 
+                      format="percent"
+                      status={getHealthStatus(analysis.profitability.operatingMargin, {good: 20, neutral: 10})}
+                      subtitle="Operating Income / Revenue"
+                    />
+                    <MetricCard 
+                      title="Net Profit Margin" 
+                      value={analysis.profitability.netMargin} 
+                      format="percent"
+                      status={getHealthStatus(analysis.profitability.netMargin, {good: 15, neutral: 5})}
+                      subtitle="Net Income / Revenue"
+                    />
+                    <MetricCard 
+                      title="Return on Equity (ROE)" 
+                      value={analysis.profitability.roe} 
+                      format="percent"
+                      status={getHealthStatus(analysis.profitability.roe, {good: 15, neutral: 8})}
+                      subtitle="Net Income / Equity"
+                    />
+                    <MetricCard 
+                      title="Return on Assets (ROA)" 
+                      value={analysis.profitability.roa} 
+                      format="percent"
+                      status={getHealthStatus(analysis.profitability.roa, {good: 10, neutral: 5})}
+                      subtitle="Net Income / Total Assets"
+                    />
+                    <MetricCard 
+                      title="Return on Invested Capital" 
+                      value={analysis.profitability.roic} 
+                      format="percent"
+                      status={getHealthStatus(analysis.profitability.roic, {good: 12, neutral: 6})}
+                      subtitle="NOPAT / (Debt + Equity)"
+                    />
+                  </div>
+                </div>
+
+                {/* Liquidity Metrics */}
+                <div className="mb-8 section-divider">
+                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Liquidity Metrics</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <MetricCard 
+                      title="Current Ratio" 
+                      value={analysis.liquidity.currentRatio} 
+                      format="ratio"
+                      status={getHealthStatus(analysis.liquidity.currentRatio, {good: 1.5, neutral: 1})}
+                      subtitle="Current Assets / Current Liabilities"
+                    />
+                    <MetricCard 
+                      title="Quick Ratio" 
+                      value={analysis.liquidity.quickRatio} 
+                      format="ratio"
+                      status={getHealthStatus(analysis.liquidity.quickRatio, {good: 1.2, neutral: 0.8})}
+                      subtitle="(Current Assets - Inventory) / Current Liab."
+                    />
+                    <MetricCard 
+                      title="Cash Ratio" 
+                      value={analysis.liquidity.cashRatio} 
+                      format="ratio"
+                      status={getHealthStatus(analysis.liquidity.cashRatio, {good: 0.5, neutral: 0.2})}
+                      subtitle="Cash / Current Liabilities"
+                    />
+                  </div>
+                </div>
+
+                {/* Leverage Metrics */}
+                <div className="mb-8 section-divider">
+                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Leverage & Solvency</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <MetricCard 
+                      title="Debt-to-Equity" 
+                      value={analysis.leverage.debtToEquity} 
+                      format="ratio"
+                      status={getHealthStatusInverse(analysis.leverage.debtToEquity, {good: 1, neutral: 2})}
+                      subtitle="Interest-bearing Debt / Equity"
+                    />
+                    <MetricCard 
+                      title="Debt-to-Assets" 
+                      value={analysis.leverage.debtToAssets} 
+                      format="ratio"
+                      status={getHealthStatusInverse(analysis.leverage.debtToAssets, {good: 0.3, neutral: 0.5})}
+                      subtitle="Interest-bearing Debt / Total Assets"
+                    />
+                    <MetricCard 
+                      title="Equity Multiplier" 
+                      value={analysis.leverage.equityMultiplier} 
+                      format="ratio"
+                      status={getHealthStatusInverse(analysis.leverage.equityMultiplier, {good: 2, neutral: 3})}
+                      subtitle="Total Assets / Equity"
+                    />
+                    <MetricCard 
+                      title="Interest Coverage" 
+                      value={analysis.leverage.interestCoverage} 
+                      format="ratio"
+                      status={getHealthStatus(analysis.leverage.interestCoverage, {good: 5, neutral: 2.5})}
+                      subtitle="EBIT / Interest Expense"
+                    />
+                  </div>
+                </div>
+
+                {/* Efficiency Metrics */}
+                <div className="mb-8 section-divider">
+                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Efficiency Metrics</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <MetricCard 
+                      title="Asset Turnover" 
+                      value={analysis.efficiency.assetTurnover} 
+                      format="ratio"
+                      status={getHealthStatus(analysis.efficiency.assetTurnover, {good: 1, neutral: 0.5})}
+                      subtitle="Revenue / Total Assets"
+                    />
+                    <MetricCard 
+                      title="Inventory Turnover" 
+                      value={analysis.efficiency.inventoryTurnover} 
+                      format="ratio"
+                      status={getHealthStatus(analysis.efficiency.inventoryTurnover, {good: 6, neutral: 3})}
+                      subtitle="COGS / Inventory"
+                    />
+                    <MetricCard 
+                      title="Receivables Turnover" 
+                      value={analysis.efficiency.receivablesTurnover} 
+                      format="ratio"
+                      status={getHealthStatus(analysis.efficiency.receivablesTurnover, {good: 10, neutral: 6})}
+                      subtitle="Revenue / Accounts Receivable"
+                    />
+                    <MetricCard 
+                      title="Days Sales Outstanding" 
+                      value={analysis.efficiency.daysSalesOutstanding} 
+                      format="ratio"
+                      status={getHealthStatusInverse(analysis.efficiency.daysSalesOutstanding, {good: 30, neutral: 60})}
+                      subtitle="Days to collect receivables"
+                    />
+                    <MetricCard 
+                      title="Days Inventory Outstanding" 
+                      value={analysis.efficiency.daysInventoryOutstanding} 
+                      format="ratio"
+                      status={getHealthStatusInverse(analysis.efficiency.daysInventoryOutstanding, {good: 30, neutral: 60})}
+                      subtitle="Days to sell inventory"
+                    />
+                  </div>
+                </div>
+
+                {/* Cash Flow Metrics */}
+                <div className="mb-8 section-divider">
+                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Cash Flow Metrics</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <MetricCard 
+                      title="Operating Cash Flow" 
+                      value={analysis.rawValues.operatingCashFlow}
+                    />
+                    <MetricCard 
+                      title="Free Cash Flow" 
+                      value={analysis.rawValues.freeCashFlow}
+                      subtitle="OCF - CapEx"
+                    />
+                    <MetricCard 
+                      title="FCF Margin" 
+                      value={analysis.cashFlow.fcfMargin} 
+                      format="percent"
+                      status={getHealthStatus(analysis.cashFlow.fcfMargin, {good: 15, neutral: 8})}
+                      subtitle="FCF / Revenue"
+                    />
+                    <MetricCard 
+                      title="OCF to Net Income" 
+                      value={analysis.cashFlow.ocfToNetIncome} 
+                      format="ratio"
+                      status={getHealthStatus(analysis.cashFlow.ocfToNetIncome, {good: 1.2, neutral: 0.8})}
+                      subtitle="Quality of earnings"
+                    />
+                    <MetricCard 
+                      title="Cash Flow to Debt" 
+                      value={analysis.cashFlow.cashFlowToDebt} 
+                      format="ratio"
+                      status={getHealthStatus(analysis.cashFlow.cashFlowToDebt, {good: 0.25, neutral: 0.15})}
+                      subtitle="OCF / Total Debt"
+                    />
+                    <MetricCard 
+                      title="CapEx" 
+                      value={analysis.rawValues.capex}
+                      subtitle="Capital Expenditures"
+                    />
+                  </div>
+                </div>
+
+                {/* Per Share Metrics */}
+                <div className="mb-8 section-divider">
+                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Per Share Metrics</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <MetricCard 
+                      title="Earnings Per Share" 
+                      value={analysis.perShare.eps}
+                      subtitle={`${formatNumber(analysis.rawValues.shares)} shares outstanding`}
+                    />
+                    <MetricCard 
+                      title="Book Value Per Share" 
+                      value={analysis.perShare.bookValuePerShare}
+                      subtitle="Equity / Shares"
+                    />
+                    <MetricCard 
+                      title="Cash Per Share" 
+                      value={analysis.perShare.cashPerShare}
+                      subtitle="Cash / Shares"
+                    />
+                    <MetricCard 
+                      title="FCF Per Share" 
+                      value={analysis.perShare.fcfPerShare}
+                      subtitle="Free Cash Flow / Shares"
+                    />
+                  </div>
+                </div>
+
+                {/* Year-over-Year Comparison */}
+                {yearComparison && (
+                  <div className="mb-8 section-divider">
+                    <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">
+                      YoY Change ({yearComparison.currentYear} vs {yearComparison.previousYear})
+                    </h3>
+                    <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                        <div>
+                          <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Revenue Growth</p>
+                          <p className="text-xl font-light">
+                            <YoYChange 
+                              current={yearComparison.current.rawValues.revenue} 
+                              previous={yearComparison.previous.rawValues.revenue}
+                            />
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Net Income Growth</p>
+                          <p className="text-xl font-light">
+                            <YoYChange 
+                              current={yearComparison.current.rawValues.netIncome} 
+                              previous={yearComparison.previous.rawValues.netIncome}
+                            />
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">EPS Growth</p>
+                          <p className="text-xl font-light">
+                            <YoYChange 
+                              current={yearComparison.current.perShare.eps} 
+                              previous={yearComparison.previous.perShare.eps}
+                            />
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">FCF Growth</p>
+                          <p className="text-xl font-light">
+                            <YoYChange 
+                              current={yearComparison.current.rawValues.freeCashFlow} 
+                              previous={yearComparison.previous.rawValues.freeCashFlow}
+                            />
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Charts Section */}
+                {availableYears.length > 1 && (
+                  <div className="mb-8">
+                    <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6 pl-6">Multi-Year Trends</h3>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                      <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                        <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Revenue & Net Income (Billions)</h4>
+                        <div className="h-64">
+                          <canvas id="revenue-chart"></canvas>
+                        </div>
+                      </div>
+                      
+                      <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                        <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Profit Margins (%)</h4>
+                        <div className="h-64">
+                          <canvas id="margins-chart"></canvas>
+                        </div>
+                      </div>
+                      
+                      <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                        <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Cash Flow (Billions)</h4>
+                        <div className="h-64">
+                          <canvas id="cashflow-chart"></canvas>
+                        </div>
+                      </div>
+                      
+                      <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                        <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Key Ratios Over Time</h4>
+                        <div className="h-64">
+                          <canvas id="ratios-chart"></canvas>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Summary */}
+                <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-4">Analysis Summary</h3>
+                  <div className="space-y-3 text-gray-400 font-light text-sm leading-relaxed">
+                    <p>Revenue of {formatNumber(analysis.rawValues.revenue)} with {formatPercent(analysis.profitability.netMargin)} net margin</p>
+                    <p>Profitability: ROE of {formatPercent(analysis.profitability.roe)}, ROA of {formatPercent(analysis.profitability.roa)}, and ROIC of {formatPercent(analysis.profitability.roic)}</p>
+                    <p>Liquidity: Current ratio of {formatRatio(analysis.liquidity.currentRatio)} (ability to pay short-term obligations)</p>
+                    <p>Leverage: Debt-to-Equity of {formatRatio(analysis.leverage.debtToEquity)} using interest-bearing debt only</p>
+                    <p>Cash Generation: {formatNumber(analysis.rawValues.freeCashFlow)} in free cash flow ({formatPercent(analysis.cashFlow.fcfMargin)} FCF margin)</p>
+                    <p>Efficiency: Asset turnover of {formatRatio(analysis.efficiency.assetTurnover)} (revenue generated per dollar of assets)</p>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    const container = document.getElementById('root');
+    const root = ReactDOM.createRoot(container);
+    root.render(<FinancialAnalyzer />);
+  </script>
+</body>
+</html>
