@@ -111,6 +111,9 @@
     const [analysis, setAnalysis] = useState(null);
     const [yearComparison, setYearComparison] = useState(null);
     const [showDataSources, setShowDataSources] = useState(false);
+    const [valuations, setValuations] = useState(null);
+    const [lboModel, setLboModel] = useState(null);
+    const [showAdvanced, setShowAdvanced] = useState(false);
     
     // User credentials
     const [showCredentialsModal, setShowCredentialsModal] = useState(true);
@@ -227,6 +230,341 @@
         return { val: null, concept: 'none', confidence: 'none' };
       };
 
+      const calculateValuations = (facts, years) => {
+        const currentYear = years[0];
+        const metrics = calculateMetricsForYear(facts, currentYear);
+        
+        // Get multi-year data for growth rates
+        const historicalData = years.slice(0, 5).map(year => calculateMetricsForYear(facts, year));
+        
+        // Detect if company is profitable
+        const isProfitable = metrics.rawValues.netIncome > 0;
+        const hasPositiveFCF = metrics.rawValues.freeCashFlow > 0;
+        const hasPositiveEBITDA = (metrics.rawValues.operatingIncome + (metrics.rawValues.revenue * 0.05)) > 0;
+        
+        // Calculate growth rates
+        const revenueGrowth = historicalData.length > 1 ? 
+          ((historicalData[0].rawValues.revenue - historicalData[historicalData.length-1].rawValues.revenue) / 
+          historicalData[historicalData.length-1].rawValues.revenue / (historicalData.length - 1)) * 100 : 5;
+        
+        const fcfGrowth = historicalData.length > 1 && hasPositiveFCF ? 
+          ((historicalData[0].rawValues.freeCashFlow - historicalData[historicalData.length-1].rawValues.freeCashFlow) / 
+          Math.abs(historicalData[historicalData.length-1].rawValues.freeCashFlow) / (historicalData.length - 1)) * 100 : 5;
+        
+        // 1. BOOK VALUE METHOD
+        const bookValue = metrics.rawValues.stockholdersEquity;
+        const bookValuePerShare = metrics.rawValues.shares > 0 ? metrics.perShare.bookValuePerShare : null;
+        
+        // 2. ADJUSTED NET ASSET VALUE
+        const adjustedNetAsset = bookValue > 0 ? bookValue * 1.2 : bookValue;
+        const adjustedNetAssetPerShare = bookValuePerShare && bookValuePerShare > 0 ? bookValuePerShare * 1.2 : bookValuePerShare;
+        
+        // 3. DCF VALUATION (only if FCF is positive or can be projected to positive)
+        let dcfValuation = null;
+        if (hasPositiveFCF || (metrics.rawValues.revenue > 0 && revenueGrowth > 10)) {
+          const wacc = 0.10;
+          const terminalGrowthRate = 0.025;
+          const projectionYears = 5;
+          
+          const projectedFCF = [];
+          let currentFCF = hasPositiveFCF ? metrics.rawValues.freeCashFlow : metrics.rawValues.revenue * 0.1; // Assume 10% FCF margin in future
+          const projectedGrowthRate = Math.min(Math.max(hasPositiveFCF ? fcfGrowth / 100 : 0.20, 0.05), 0.30); // 5-30% cap
+          
+          for (let i = 1; i <= projectionYears; i++) {
+            currentFCF = currentFCF * (1 + projectedGrowthRate);
+            projectedFCF.push(currentFCF);
+          }
+          
+          let pvFCF = 0;
+          projectedFCF.forEach((fcf, i) => {
+            pvFCF += fcf / Math.pow(1 + wacc, i + 1);
+          });
+          
+          const terminalFCF = projectedFCF[projectedFCF.length - 1] * (1 + terminalGrowthRate);
+          const terminalValue = terminalFCF / (wacc - terminalGrowthRate);
+          const pvTerminalValue = terminalValue / Math.pow(1 + wacc, projectionYears);
+          
+          const enterpriseValueDCF = pvFCF + pvTerminalValue;
+          const equityValueDCF = enterpriseValueDCF - metrics.rawValues.totalDebt + metrics.rawValues.cash;
+          const equityValuePerShareDCF = metrics.rawValues.shares > 0 ? equityValueDCF / metrics.rawValues.shares : null;
+          
+          dcfValuation = {
+            enterpriseValue: enterpriseValueDCF,
+            equityValue: equityValueDCF,
+            perShare: equityValuePerShareDCF,
+            wacc: wacc * 100,
+            terminalGrowth: terminalGrowthRate * 100,
+            projectedFCF,
+            pvFCF,
+            terminalValue,
+            pvTerminalValue,
+            description: hasPositiveFCF ? "Discounted cash flow valuation" : "DCF with projected positive FCF",
+            isProjected: !hasPositiveFCF
+          };
+        }
+        
+        // 4. REVENUE MULTIPLE VALUATION (for unprofitable high-growth companies)
+        const revenueMultipleValuation = {
+          applicable: !isProfitable && metrics.rawValues.revenue > 0,
+          description: "Revenue-based valuation for growth companies"
+        };
+        
+        if (revenueMultipleValuation.applicable) {
+          // Use industry-specific multiples (these are approximations)
+          let assumedRevenueMultiple = 3.0; // Default conservative
+          
+          // Adjust based on growth rate
+          if (revenueGrowth > 50) assumedRevenueMultiple = 8.0;
+          else if (revenueGrowth > 30) assumedRevenueMultiple = 6.0;
+          else if (revenueGrowth > 15) assumedRevenueMultiple = 4.0;
+          
+          const enterpriseValue = metrics.rawValues.revenue * assumedRevenueMultiple;
+          const equityValue = enterpriseValue - metrics.rawValues.totalDebt + metrics.rawValues.cash;
+          
+          revenueMultipleValuation.multiple = assumedRevenueMultiple;
+          revenueMultipleValuation.enterpriseValue = enterpriseValue;
+          revenueMultipleValuation.equityValue = equityValue;
+          revenueMultipleValuation.perShare = metrics.rawValues.shares > 0 ? equityValue / metrics.rawValues.shares : null;
+          revenueMultipleValuation.revenueGrowth = revenueGrowth;
+        }
+        
+        // 5. DIVIDEND DISCOUNT MODEL (only if dividends exist and profitable)
+        const dividendYield = metrics.rawValues.dividends > 0 && metrics.rawValues.stockholdersEquity > 0 ?
+          (metrics.rawValues.dividends / metrics.rawValues.stockholdersEquity) : 0;
+        const assumedDividendGrowth = 0.05;
+        const costOfEquity = 0.12;
+        
+        let ddmValue = null;
+        if (dividendYield > 0 && costOfEquity > assumedDividendGrowth && isProfitable) {
+          const currentDividendPerShare = metrics.rawValues.shares > 0 ? 
+            metrics.rawValues.dividends / metrics.rawValues.shares : 0;
+          ddmValue = (currentDividendPerShare * (1 + assumedDividendGrowth)) / (costOfEquity - assumedDividendGrowth);
+        }
+        
+        // 6. EXCESS EARNINGS METHOD (only for profitable companies)
+        let excessEarningsValuation = null;
+        if (isProfitable) {
+          const normalReturnOnAssets = 0.08;
+          const normalEarnings = metrics.rawValues.totalAssets * normalReturnOnAssets;
+          const excessEarnings = metrics.rawValues.netIncome - normalEarnings;
+          const intangibleCapRate = 0.15;
+          const intangibleValue = excessEarnings > 0 ? excessEarnings / intangibleCapRate : 0;
+          const excessEarningsValue = metrics.rawValues.totalAssets + intangibleValue;
+          
+          excessEarningsValuation = {
+            total: excessEarningsValue,
+            tangibleValue: metrics.rawValues.totalAssets,
+            intangibleValue: intangibleValue,
+            excessEarnings: excessEarnings,
+            description: "Value based on excess earnings over normal returns"
+          };
+        }
+        
+        // 7. COMPARABLE MULTIPLES (only for profitable companies)
+        let comparablesValuation = null;
+        if (isProfitable) {
+          const assumedPEMultiple = 15;
+          const assumedEVToEBITDA = 10;
+          const ebitda = metrics.rawValues.operatingIncome + (metrics.rawValues.revenue * 0.05);
+          
+          const peValuation = metrics.rawValues.netIncome * assumedPEMultiple;
+          const evToEbitdaValuation = hasPositiveEBITDA ? 
+            (ebitda * assumedEVToEBITDA) - metrics.rawValues.totalDebt + metrics.rawValues.cash : null;
+          
+          comparablesValuation = {
+            peValuation,
+            evToEbitdaValuation,
+            assumedPE: assumedPEMultiple,
+            assumedEVToEBITDA: assumedEVToEBITDA,
+            description: "Valuation using industry multiples",
+            applicable: hasPositiveEBITDA
+          };
+        }
+        
+        // Calculate average (only including valid valuations)
+        const validEquityValues = [];
+        const validPerShareValues = [];
+        
+        if (dcfValuation && dcfValuation.equityValue > 0) {
+          validEquityValues.push(dcfValuation.equityValue);
+          if (dcfValuation.perShare) validPerShareValues.push(dcfValuation.perShare);
+        }
+        
+        if (adjustedNetAsset > 0) {
+          validEquityValues.push(adjustedNetAsset);
+          if (adjustedNetAssetPerShare) validPerShareValues.push(adjustedNetAssetPerShare);
+        }
+        
+        if (revenueMultipleValuation.applicable && revenueMultipleValuation.equityValue > 0) {
+          validEquityValues.push(revenueMultipleValuation.equityValue);
+          if (revenueMultipleValuation.perShare) validPerShareValues.push(revenueMultipleValuation.perShare);
+        }
+        
+        if (comparablesValuation) {
+          if (comparablesValuation.peValuation > 0) {
+            validEquityValues.push(comparablesValuation.peValuation);
+            if (metrics.rawValues.shares > 0) validPerShareValues.push(comparablesValuation.peValuation / metrics.rawValues.shares);
+          }
+          if (comparablesValuation.evToEbitdaValuation && comparablesValuation.evToEbitdaValuation > 0) {
+            validEquityValues.push(comparablesValuation.evToEbitdaValuation);
+            if (metrics.rawValues.shares > 0) validPerShareValues.push(comparablesValuation.evToEbitdaValuation / metrics.rawValues.shares);
+          }
+        }
+        
+        const averageEquityValue = validEquityValues.length > 0 ? 
+          validEquityValues.reduce((a, b) => a + b, 0) / validEquityValues.length : null;
+        const averagePerShare = validPerShareValues.length > 0 ? 
+          validPerShareValues.reduce((a, b) => a + b, 0) / validPerShareValues.length : null;
+        
+        return {
+          companyStage: {
+            isProfitable,
+            hasPositiveFCF,
+            hasPositiveEBITDA,
+            revenueGrowth,
+            stage: !isProfitable && revenueGrowth > 20 ? "High-Growth Unprofitable" : 
+                   !isProfitable ? "Early-Stage/Turnaround" : "Mature/Profitable"
+          },
+          bookValue: {
+            total: bookValue,
+            perShare: bookValuePerShare,
+            description: "Net asset value from balance sheet",
+            applicable: true
+          },
+          adjustedNetAsset: {
+            total: adjustedNetAsset,
+            perShare: adjustedNetAssetPerShare,
+            description: "Book value adjusted for fair market value (20% premium)",
+            applicable: true
+          },
+          dcf: dcfValuation,
+          revenueMultiple: revenueMultipleValuation,
+          ddm: ddmValue ? {
+            perShare: ddmValue,
+            dividendYield: dividendYield * 100,
+            applicable: true,
+            description: "Dividend discount model (Gordon Growth)"
+          } : null,
+          excessEarnings: excessEarningsValuation,
+          comparables: comparablesValuation,
+          summary: {
+            averageEquityValue,
+            averagePerShare,
+            validationCount: validEquityValues.length,
+            warning: validEquityValues.length < 2 ? "Limited valuation methods applicable - company may be early-stage or distressed" : null
+          }
+        };
+      };
+      
+      const calculateLBO = (facts, years) => {
+        const currentYear = years[0];
+        const metrics = calculateMetricsForYear(facts, currentYear);
+        
+        // Calculate EBITDA
+        const ebitda = metrics.rawValues.operatingIncome + (metrics.rawValues.revenue * 0.05);
+        
+        // Check if LBO is viable
+        if (ebitda <= 0) {
+          return {
+            applicable: false,
+            reason: "LBO model not applicable: Company has negative EBITDA",
+            ebitda: ebitda,
+            suggestion: "LBO transactions typically require positive EBITDA and stable cash flows. Consider waiting until the company reaches profitability or use alternative financing structures."
+          };
+        }
+        
+        if (metrics.rawValues.freeCashFlow < 0) {
+          return {
+            applicable: false,
+            reason: "LBO model not recommended: Company has negative free cash flow",
+            fcf: metrics.rawValues.freeCashFlow,
+            ebitda: ebitda,
+            suggestion: "While the company has positive EBITDA, negative FCF makes debt servicing challenging. An LBO would require significant operational improvements or be highly risky."
+          };
+        }
+        
+        // LBO Assumptions
+        const purchaseMultiple = 8.0;
+        const exitMultiple = 9.0;
+        const debtMultiple = 5.0;
+        const equityContribution = 0.40;
+        const interestRate = 0.065;
+        const holdingPeriod = 5;
+        
+        // Purchase Price
+        const purchasePrice = ebitda * purchaseMultiple;
+        const debtFinancing = Math.min(ebitda * debtMultiple, purchasePrice * (1 - equityContribution));
+        const equityInvestment = purchasePrice - debtFinancing;
+        
+        // Project financials
+        const projections = [];
+        let remainingDebt = debtFinancing;
+        const growthRate = 0.05;
+        
+        for (let year = 1; year <= holdingPeriod; year++) {
+          const yearRevenue = metrics.rawValues.revenue * Math.pow(1 + growthRate, year);
+          const yearEBITDA = yearRevenue * (ebitda / metrics.rawValues.revenue);
+          const yearFCF = Math.max(metrics.rawValues.freeCashFlow * Math.pow(1 + growthRate, year), yearEBITDA * 0.5);
+          
+          const interestExpense = remainingDebt * interestRate;
+          const principalPayment = Math.max(0, yearFCF - interestExpense);
+          remainingDebt = Math.max(0, remainingDebt - principalPayment);
+          
+          projections.push({
+            year,
+            revenue: yearRevenue,
+            ebitda: yearEBITDA,
+            fcf: yearFCF,
+            interestExpense,
+            principalPayment,
+            debtBalance: remainingDebt
+          });
+        }
+        
+        // Exit Analysis
+        const exitEBITDA = projections[projections.length - 1].ebitda;
+        const exitEnterpriseValue = exitEBITDA * exitMultiple;
+        const exitDebt = projections[projections.length - 1].debtBalance;
+        const exitEquityValue = exitEnterpriseValue - exitDebt;
+        
+        // Returns Calculation
+        const moic = exitEquityValue / equityInvestment;
+        const irr = (Math.pow(moic, 1 / holdingPeriod) - 1) * 100;
+        
+        return {
+          applicable: true,
+          assumptions: {
+            purchaseMultiple,
+            exitMultiple,
+            debtMultiple,
+            equityContribution: equityContribution * 100,
+            interestRate: interestRate * 100,
+            holdingPeriod,
+            revenueGrowth: growthRate * 100
+          },
+          entry: {
+            ebitda,
+            purchasePrice,
+            debtFinancing,
+            equityInvestment,
+            debtToEquity: debtFinancing / equityInvestment
+          },
+          projections,
+          exit: {
+            ebitda: exitEBITDA,
+            enterpriseValue: exitEnterpriseValue,
+            debt: exitDebt,
+            equityValue: exitEquityValue
+          },
+          returns: {
+            moic,
+            irr,
+            totalReturn: exitEquityValue - equityInvestment,
+            returnMultiple: exitEquityValue / equityInvestment
+          }
+        };
+      };
+
       const calculateMetricsForYear = (facts, year) => {
         // Track data sources for transparency
         const dataSources = {};
@@ -314,7 +652,7 @@
         const currentLiabilities = getValueWithFallback(facts, ['LiabilitiesCurrent'], year);
         dataSources.currentLiabilities = currentLiabilities.concept;
         
-        // IMPROVED DEBT CALCULATION - Only interest-bearing debt : to come back to : Revise again
+        // IMPROVED DEBT CALCULATION - Only interest-bearing debt
         const longTermDebt = getValueWithFallback(facts, [
           'LongTermDebt',
           'LongTermDebtNoncurrent',
@@ -611,6 +949,14 @@
             companyName: data.entityName,
             ...metrics
             });
+            
+            // Calculate valuations
+            const valuationResults = calculateValuations(facts, years);
+            setValuations(valuationResults);
+            
+            // Calculate LBO model
+            const lboResults = calculateLBO(facts, years);
+            setLboModel(lboResults);
 
             // Calculate year-over-year comparison if we have multiple years
             if (years.length > 1) {
@@ -639,11 +985,17 @@
           companyName: companyData.entityName,
           ...metrics
         });
+        
+        // Recalculate valuations for selected year
+        const yearIndex = availableYears.indexOf(parseInt(year));
+        const relevantYears = availableYears.slice(yearIndex);
+        setValuations(calculateValuations(facts, relevantYears));
+        setLboModel(calculateLBO(facts, relevantYears));
 
         // Update comparison
-        const yearIndex = availableYears.indexOf(parseInt(year));
-        if (yearIndex < availableYears.length - 1) {
-          const prevYear = availableYears[yearIndex + 1];
+        const yearIndexComp = availableYears.indexOf(parseInt(year));
+        if (yearIndexComp < availableYears.length - 1) {
+          const prevYear = availableYears[yearIndexComp + 1];
           const prevYearMetrics = calculateMetricsForYear(facts, prevYear);
           setYearComparison({
             currentYear: parseInt(year),
@@ -1504,6 +1856,435 @@
                     />
                   </div>
                 </div>
+
+                {/* Advanced Analysis Toggle */}
+                <div className="mb-8 flex justify-center">
+                  <button
+                    onClick={() => setShowAdvanced(!showAdvanced)}
+                    className="px-6 py-3 bg-zinc-900 hover:bg-zinc-800 text-white rounded border border-zinc-800 transition-colors font-light tracking-wide"
+                  >
+                    {showAdvanced ? 'Hide' : 'Show'} Advanced Analysis (Valuations & LBO)
+                  </button>
+                </div>
+
+                {/* VALUATIONS SECTION */}
+                {showAdvanced && valuations && (
+                  <>
+                    <div className="mb-8 section-divider">
+                      <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Company Valuation Methods</h3>
+                      
+                      {/* Company Stage Indicator */}
+                      <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-6">
+                        <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Company Profile</h4>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                          <div>
+                            <span className="text-gray-600">Stage:</span>
+                            <span className={`ml-2 font-medium ${
+                              valuations.companyStage.stage.includes('High-Growth') ? 'text-blue-400' :
+                              valuations.companyStage.stage.includes('Early-Stage') ? 'text-yellow-400' : 'text-green-400'
+                            }`}>
+                              {valuations.companyStage.stage}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-gray-600">Profitable:</span>
+                            <span className={`ml-2 ${valuations.companyStage.isProfitable ? 'text-green-400' : 'text-red-400'}`}>
+                              {valuations.companyStage.isProfitable ? 'Yes' : 'No'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-gray-600">Positive FCF:</span>
+                            <span className={`ml-2 ${valuations.companyStage.hasPositiveFCF ? 'text-green-400' : 'text-red-400'}`}>
+                              {valuations.companyStage.hasPositiveFCF ? 'Yes' : 'No'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-gray-600">Revenue Growth:</span>
+                            <span className={`ml-2 ${valuations.companyStage.revenueGrowth > 20 ? 'text-green-400' : 'text-gray-400'}`}>
+                              {formatPercent(valuations.companyStage.revenueGrowth)}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      {/* Valuation Summary */}
+                      {valuations.summary.averageEquityValue && (
+                        <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-6">
+                          <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Valuation Summary</h4>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                              <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Average Equity Value</p>
+                              <p className="text-3xl font-light text-white">{formatNumber(valuations.summary.averageEquityValue)}</p>
+                              <p className="text-xs text-gray-600 mt-1">Based on {valuations.summary.validationCount} applicable methods</p>
+                            </div>
+                            <div>
+                              <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Average Per Share Value</p>
+                              <p className="text-3xl font-light text-white">{valuations.summary.averagePerShare ? formatNumber(valuations.summary.averagePerShare) : 'N/A'}</p>
+                            </div>
+                          </div>
+                          {valuations.summary.warning && (
+                            <div className="mt-4 p-3 bg-yellow-950 border border-yellow-900 rounded">
+                              <p className="text-sm text-yellow-400 font-light">{valuations.summary.warning}</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Individual Valuation Methods */}
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        {/* Book Value */}
+                        {valuations.bookValue && (
+                          <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">Book Value Method</h4>
+                            <p className="text-xs text-gray-600 mb-4 font-light">{valuations.bookValue.description}</p>
+                            <div className="space-y-3">
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Total Value</span>
+                                <span className="text-lg font-light text-white">{formatNumber(valuations.bookValue.total)}</span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Per Share</span>
+                                <span className="text-lg font-light text-white">{valuations.bookValue.perShare ? formatNumber(valuations.bookValue.perShare) : 'N/A'}</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Adjusted Net Asset */}
+                        {valuations.adjustedNetAsset && (
+                          <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">Adjusted Net Asset Value</h4>
+                            <p className="text-xs text-gray-600 mb-4 font-light">{valuations.adjustedNetAsset.description}</p>
+                            <div className="space-y-3">
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Total Value</span>
+                                <span className="text-lg font-light text-white">{formatNumber(valuations.adjustedNetAsset.total)}</span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Per Share</span>
+                                <span className="text-lg font-light text-white">{valuations.adjustedNetAsset.perShare ? formatNumber(valuations.adjustedNetAsset.perShare) : 'N/A'}</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* DCF Valuation */}
+                        {valuations.dcf && (
+                          <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">DCF Valuation</h4>
+                            <p className="text-xs text-gray-600 mb-4 font-light">{valuations.dcf.description}</p>
+                            {valuations.dcf.isProjected && (
+                              <div className="mb-3 p-2 bg-blue-950 border border-blue-900 rounded">
+                                <p className="text-xs text-blue-400 font-light">Using projected positive FCF based on revenue growth</p>
+                              </div>
+                            )}
+                            <div className="space-y-3">
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Enterprise Value</span>
+                                <span className="text-lg font-light text-white">{formatNumber(valuations.dcf.enterpriseValue)}</span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Equity Value</span>
+                                <span className="text-lg font-light text-white">{formatNumber(valuations.dcf.equityValue)}</span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Per Share</span>
+                                <span className="text-lg font-light text-white">{valuations.dcf.perShare ? formatNumber(valuations.dcf.perShare) : 'N/A'}</span>
+                              </div>
+                              <div className="pt-3 border-t border-zinc-800 text-xs text-gray-600 space-y-1">
+                                <div className="flex justify-between">
+                                  <span>WACC:</span>
+                                  <span>{formatPercent(valuations.dcf.wacc)}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span>Terminal Growth:</span>
+                                  <span>{formatPercent(valuations.dcf.terminalGrowth)}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span>PV of FCF:</span>
+                                  <span>{formatNumber(valuations.dcf.pvFCF)}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span>PV of Terminal:</span>
+                                  <span>{formatNumber(valuations.dcf.pvTerminalValue)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Revenue Multiple (for unprofitable companies) */}
+                        {valuations.revenueMultiple?.applicable && (
+                          <div className="bg-zinc-950 border border-blue-900 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-blue-400 mb-3 uppercase tracking-wide">Revenue Multiple Valuation</h4>
+                            <p className="text-xs text-gray-600 mb-4 font-light">{valuations.revenueMultiple.description}</p>
+                            <div className="space-y-3">
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Revenue Multiple</span>
+                                <span className="text-lg font-light text-blue-400">{formatRatio(valuations.revenueMultiple.multiple)}x</span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Enterprise Value</span>
+                                <span className="text-lg font-light text-white">{formatNumber(valuations.revenueMultiple.enterpriseValue)}</span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Equity Value</span>
+                                <span className="text-lg font-light text-white">{formatNumber(valuations.revenueMultiple.equityValue)}</span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Per Share</span>
+                                <span className="text-lg font-light text-white">{valuations.revenueMultiple.perShare ? formatNumber(valuations.revenueMultiple.perShare) : 'N/A'}</span>
+                              </div>
+                              <div className="pt-3 border-t border-zinc-800 text-xs text-gray-600">
+                                <div className="flex justify-between">
+                                  <span>Revenue Growth:</span>
+                                  <span>{formatPercent(valuations.revenueMultiple.revenueGrowth)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Excess Earnings */}
+                        {valuations.excessEarnings && (
+                          <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">Excess Earnings Method</h4>
+                            <p className="text-xs text-gray-600 mb-4 font-light">{valuations.excessEarnings.description}</p>
+                            <div className="space-y-3">
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Total Value</span>
+                                <span className="text-lg font-light text-white">{formatNumber(valuations.excessEarnings.total)}</span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Tangible Assets</span>
+                                <span className="text-sm font-light text-gray-400">{formatNumber(valuations.excessEarnings.tangibleValue)}</span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Intangible Value</span>
+                                <span className="text-sm font-light text-gray-400">{formatNumber(valuations.excessEarnings.intangibleValue)}</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Comparable Multiples */}
+                        {valuations.comparables && (
+                          <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">Comparable Multiples</h4>
+                            <p className="text-xs text-gray-600 mb-4 font-light">{valuations.comparables.description}</p>
+                            <div className="space-y-3">
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">P/E Valuation ({valuations.comparables.assumedPE}x)</span>
+                                <span className="text-lg font-light text-white">{formatNumber(valuations.comparables.peValuation)}</span>
+                              </div>
+                              {valuations.comparables.applicable && valuations.comparables.evToEbitdaValuation && (
+                                <div className="flex justify-between items-center">
+                                  <span className="text-xs text-gray-500 uppercase tracking-wider">EV/EBITDA ({valuations.comparables.assumedEVToEBITDA}x)</span>
+                                  <span className="text-lg font-light text-white">{formatNumber(valuations.comparables.evToEbitdaValuation)}</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* DDM (if applicable) */}
+                        {valuations.ddm && (
+                          <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">Dividend Discount Model</h4>
+                            <p className="text-xs text-gray-600 mb-4 font-light">{valuations.ddm.description}</p>
+                            <div className="space-y-3">
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Value Per Share</span>
+                                <span className="text-lg font-light text-white">{formatNumber(valuations.ddm.perShare)}</span>
+                              </div>
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-gray-500 uppercase tracking-wider">Dividend Yield</span>
+                                <span className="text-sm font-light text-gray-400">{formatPercent(valuations.ddm.dividendYield)}</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* LBO MODEL SECTION */}
+                    {lboModel && (
+                      <div className="mb-8 section-divider">
+                        <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Leveraged Buyout Analysis</h3>
+                        
+                        {!lboModel.applicable ? (
+                          <div className="bg-zinc-950 border border-red-900 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-red-400 mb-3 uppercase tracking-wide">LBO Not Applicable</h4>
+                            <p className="text-gray-400 mb-4 font-light">{lboModel.reason}</p>
+                            <div className="space-y-2 text-sm text-gray-500 mb-4">
+                              {lboModel.ebitda !== undefined && (
+                                <div className="flex justify-between">
+                                  <span>Current EBITDA:</span>
+                                  <span className={lboModel.ebitda > 0 ? 'text-green-400' : 'text-red-400'}>{formatNumber(lboModel.ebitda)}</span>
+                                </div>
+                              )}
+                              {lboModel.fcf !== undefined && (
+                                <div className="flex justify-between">
+                                  <span>Current FCF:</span>
+                                  <span className={lboModel.fcf > 0 ? 'text-green-400' : 'text-red-400'}>{formatNumber(lboModel.fcf)}</span>
+                                </div>
+                              )}
+                            </div>
+                            <div className="p-3 bg-zinc-900 border border-zinc-800 rounded">
+                              <p className="text-xs text-gray-400 font-light">{lboModel.suggestion}</p>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            {/* LBO Returns Summary */}
+                            <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-6">
+                              <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Investment Returns</h4>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                                <div>
+                                  <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">IRR</p>
+                                  <p className="text-3xl font-light text-green-500">{formatPercent(lboModel.returns.irr)}</p>
+                                </div>
+                                <div>
+                                  <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">MOIC</p>
+                                  <p className="text-3xl font-light text-white">{formatRatio(lboModel.returns.moic)}x</p>
+                                </div>
+                                <div>
+                                  <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Total Return</p>
+                                  <p className="text-3xl font-light text-white">{formatNumber(lboModel.returns.totalReturn)}</p>
+                                </div>
+                                <div>
+                                  <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Equity Investment</p>
+                                  <p className="text-3xl font-light text-white">{formatNumber(lboModel.entry.equityInvestment)}</p>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* LBO Structure */}
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                              {/* Entry */}
+                              <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                                <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Transaction Entry</h4>
+                                <div className="space-y-3">
+                                  <div className="flex justify-between items-center">
+                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Entry EBITDA</span>
+                                    <span className="text-base font-light text-white">{formatNumber(lboModel.entry.ebitda)}</span>
+                                  </div>
+                                  <div className="flex justify-between items-center">
+                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Purchase Price ({formatRatio(lboModel.assumptions.purchaseMultiple)}x)</span>
+                                    <span className="text-base font-light text-white">{formatNumber(lboModel.entry.purchasePrice)}</span>
+                                  </div>
+                                  <div className="flex justify-between items-center">
+                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Debt Financing</span>
+                                    <span className="text-base font-light text-white">{formatNumber(lboModel.entry.debtFinancing)}</span>
+                                  </div>
+                                  <div className="flex justify-between items-center">
+                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Equity Investment</span>
+                                    <span className="text-base font-light text-white">{formatNumber(lboModel.entry.equityInvestment)}</span>
+                                  </div>
+                                  <div className="flex justify-between items-center">
+                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Debt/Equity Ratio</span>
+                                    <span className="text-base font-light text-gray-400">{formatRatio(lboModel.entry.debtToEquity)}</span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Exit */}
+                              <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                                <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Transaction Exit (Year {lboModel.assumptions.holdingPeriod})</h4>
+                                <div className="space-y-3">
+                                  <div className="flex justify-between items-center">
+                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Exit EBITDA</span>
+                                    <span className="text-base font-light text-white">{formatNumber(lboModel.exit.ebitda)}</span>
+                                  </div>
+                                  <div className="flex justify-between items-center">
+                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Exit EV ({formatRatio(lboModel.assumptions.exitMultiple)}x)</span>
+                                    <span className="text-base font-light text-white">{formatNumber(lboModel.exit.enterpriseValue)}</span>
+                                  </div>
+                                  <div className="flex justify-between items-center">
+                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Remaining Debt</span>
+                                    <span className="text-base font-light text-white">{formatNumber(lboModel.exit.debt)}</span>
+                                  </div>
+                                  <div className="flex justify-between items-center">
+                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Exit Equity Value</span>
+                                    <span className="text-base font-light text-green-500">{formatNumber(lboModel.exit.equityValue)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Assumptions */}
+                            <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-6">
+                              <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Model Assumptions</h4>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+                                <div>
+                                  <span className="text-gray-600">Purchase Multiple:</span>
+                                  <span className="text-white ml-2">{formatRatio(lboModel.assumptions.purchaseMultiple)}x</span>
+                                </div>
+                                <div>
+                                  <span className="text-gray-600">Exit Multiple:</span>
+                                  <span className="text-white ml-2">{formatRatio(lboModel.assumptions.exitMultiple)}x</span>
+                                </div>
+                                <div>
+                                  <span className="text-gray-600">Debt Multiple:</span>
+                                  <span className="text-white ml-2">{formatRatio(lboModel.assumptions.debtMultiple)}x</span>
+                                </div>
+                                <div>
+                                  <span className="text-gray-600">Interest Rate:</span>
+                                  <span className="text-white ml-2">{formatPercent(lboModel.assumptions.interestRate)}</span>
+                                </div>
+                                <div>
+                                  <span className="text-gray-600">Equity %:</span>
+                                  <span className="text-white ml-2">{formatPercent(lboModel.assumptions.equityContribution)}</span>
+                                </div>
+                                <div>
+                                  <span className="text-gray-600">Hold Period:</span>
+                                  <span className="text-white ml-2">{lboModel.assumptions.holdingPeriod} years</span>
+                                </div>
+                                <div>
+                                  <span className="text-gray-600">Revenue Growth:</span>
+                                  <span className="text-white ml-2">{formatPercent(lboModel.assumptions.revenueGrowth)}</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Projection Table */}
+                            <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
+                              <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">5-Year Projections & Debt Paydown</h4>
+                              <div className="overflow-x-auto">
+                                <table className="w-full text-sm">
+                                  <thead>
+                                    <tr className="border-b border-zinc-800">
+                                      <th className="text-left text-xs text-gray-500 uppercase tracking-wider py-2">Year</th>
+                                      <th className="text-right text-xs text-gray-500 uppercase tracking-wider py-2">Revenue</th>
+                                      <th className="text-right text-xs text-gray-500 uppercase tracking-wider py-2">EBITDA</th>
+                                      <th className="text-right text-xs text-gray-500 uppercase tracking-wider py-2">FCF</th>
+                                      <th className="text-right text-xs text-gray-500 uppercase tracking-wider py-2">Interest</th>
+                                      <th className="text-right text-xs text-gray-500 uppercase tracking-wider py-2">Principal</th>
+                                      <th className="text-right text-xs text-gray-500 uppercase tracking-wider py-2">Debt Balance</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {lboModel.projections.map(proj => (
+                                      <tr key={proj.year} className="border-b border-zinc-900">
+                                        <td className="py-2 text-white font-light">{proj.year}</td>
+                                        <td className="py-2 text-right text-gray-400 font-light">{formatNumber(proj.revenue)}</td>
+                                        <td className="py-2 text-right text-gray-400 font-light">{formatNumber(proj.ebitda)}</td>
+                                        <td className="py-2 text-right text-gray-400 font-light">{formatNumber(proj.fcf)}</td>
+                                        <td className="py-2 text-right text-gray-400 font-light">{formatNumber(proj.interestExpense)}</td>
+                                        <td className="py-2 text-right text-green-500 font-light">{formatNumber(proj.principalPayment)}</td>
+                                        <td className="py-2 text-right text-white font-light">{formatNumber(proj.debtBalance)}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
 
                 {/* Year-over-Year Comparison */}
                 {yearComparison && (
