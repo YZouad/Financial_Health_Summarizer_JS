@@ -61,31 +61,6 @@
       background: rgba(15, 15, 15, 0.5);
     }
 
-    .expandable-section {
-      border-left: 1px solid #222;
-      transition: border-color 0.3s;
-      cursor: pointer;
-    }
-
-    .expandable-section:hover {
-      border-left-color: #333;
-    }
-
-    .expand-icon {
-      width: 10px;
-      height: 10px;
-      border-right: 2px solid #666;
-      border-bottom: 2px solid #666;
-      transform: rotate(45deg);
-      transition: all 0.3s ease;
-      margin-top: -3px;
-    }
-
-    .expandable-section.expanded .expand-icon {
-      transform: rotate(-135deg);
-      margin-top: 3px;
-    }
-
     .status-good { color: #10b981; }
     .status-neutral { color: #f59e0b; }
     .status-poor { color: #ef4444; }
@@ -93,6 +68,84 @@
     input:focus, select:focus, button:focus {
       outline: none;
       border-color: #444 !important;
+    }
+
+    .tab-button {
+      position: relative;
+      padding: 12px 24px;
+      background: transparent;
+      border: none;
+      color: #6b7280;
+      cursor: pointer;
+      transition: all 0.3s;
+      font-weight: 300;
+      font-size: 14px;
+      letter-spacing: 0.05em;
+    }
+
+    .tab-button:hover {
+      color: #9ca3af;
+    }
+
+    .tab-button.active {
+      color: #fff;
+    }
+
+    .tab-button.active::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: #fff;
+    }
+
+    .fair-value-card {
+      background: rgba(10, 10, 10, 0.5);
+      border: 1px solid #1a1a1a;
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .fair-value-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .fair-value-card:hover::before {
+      opacity: 1;
+    }
+
+    .fair-value-card:hover {
+      border-color: #2a2a2a;
+      background: rgba(15, 15, 15, 0.5);
+    }
+
+    .upside-positive {
+      color: #10b981;
+    }
+
+    .upside-negative {
+      color: #ef4444;
+    }
+
+    .formula-box {
+      background: rgba(0, 0, 0, 0.5);
+      border: 1px solid #27272a;
+      border-radius: 6px;
+      padding: 12px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      color: #a1a1aa;
     }
   </style>
 </head>
@@ -113,9 +166,12 @@
     const [showDataSources, setShowDataSources] = useState(false);
     const [valuations, setValuations] = useState(null);
     const [lboModel, setLboModel] = useState(null);
-    const [showAdvanced, setShowAdvanced] = useState(false);
+    const [fairValue, setFairValue] = useState(null);
+    const [activeTab, setActiveTab] = useState('overview');
+    const [debugInfo, setDebugInfo] = useState(null);
     
-    // User credentials
+    const [currentStockPrice, setCurrentStockPrice] = useState('');
+    
     const [showCredentialsModal, setShowCredentialsModal] = useState(true);
     const [userOrg, setUserOrg] = useState('');
     const [userEmail, setUserEmail] = useState('');
@@ -124,7 +180,6 @@
     
     const chartsRef = useRef({});
 
-    // Check if credentials are already set (in memory)
     useEffect(() => {
         if (userAgent) {
         setCredentialsSet(true);
@@ -184,15 +239,36 @@
         const company = Object.values(data).find(
         c => c.ticker && c.ticker.toLowerCase() === tickerSymbol.toLowerCase()
         );
-        return company ? String(company.cik_str).padStart(10, '0') : null;
+        
+        if (!company) {
+          // Provide helpful error message
+          throw new Error(`Ticker "${tickerSymbol}" not found in SEC database. This could mean:\n- The ticker symbol is incorrect\n- The company doesn't file with the SEC (foreign companies, private companies)\n- The company recently changed tickers\n- Try searching on sec.gov/edgar to verify the ticker`);
+        }
+        
+        return String(company.cik_str).padStart(10, '0');
     };
 
       const getAvailableYears = (facts) => {
         const years = new Set();
-        const revenueConcepts = ['Revenues', 'RevenueFromContractWithCustomerExcludingAssessedTax', 'SalesRevenueNet'];
+        
+        // Expanded list of revenue concepts to catch more companies
+        const revenueConcepts = [
+          'Revenues',
+          'RevenueFromContractWithCustomerExcludingAssessedTax',
+          'RevenueFromContractWithCustomerIncludingAssessedTax',
+          'SalesRevenueNet',
+          'SalesRevenueGoodsNet',
+          'SalesRevenueServicesNet',
+          'RegulatedAndUnregulatedOperatingRevenue',
+          'OilAndGasRevenue',
+          'InterestAndDividendIncomeOperating',
+          'InterestIncomeOperating', // For financial institutions
+          'TotalRevenues', // Sometimes used
+          'Revenue' // Generic fallback
+        ];
         
         for (const concept of revenueConcepts) {
-          if (facts[concept] && facts[concept].units['USD']) {
+          if (facts[concept] && facts[concept].units && facts[concept].units['USD']) {
             const data = facts[concept].units['USD'];
             data.forEach(item => {
               if (item.fy && (item.form === '10-K' || item.form === '10-K/A' || item.fp === 'FY')) {
@@ -201,6 +277,27 @@
             });
           }
         }
+        
+        // If no years found with standard revenue concepts, try to find ANY 10-K filings
+        if (years.size === 0) {
+          console.log('No revenue data found, checking for any 10-K filings...');
+          // Try net income as a fallback
+          const fallbackConcepts = ['NetIncomeLoss', 'ProfitLoss', 'Assets', 'StockholdersEquity'];
+          for (const concept of fallbackConcepts) {
+            if (facts[concept] && facts[concept].units) {
+              const units = facts[concept].units['USD'] || facts[concept].units['shares'];
+              if (units) {
+                units.forEach(item => {
+                  if (item.fy && (item.form === '10-K' || item.form === '10-K/A' || item.fp === 'FY')) {
+                    years.add(item.fy);
+                  }
+                });
+              }
+            }
+            if (years.size > 0) break;
+          }
+        }
+        
         return Array.from(years).sort((a, b) => b - a);
       };
 
@@ -219,7 +316,6 @@
         return yearData[0];
       };
 
-      // Helper to try multiple concept names and return the first found, with metadata
       const getValueWithFallback = (facts, concepts, year, units = 'USD') => {
         for (const concept of concepts) {
           const value = getValueForYear(facts, concept, year, units);
@@ -230,19 +326,288 @@
         return { val: null, concept: 'none', confidence: 'none' };
       };
 
+      const calculateFairValue = (metrics, historicalData) => {
+        const eps = metrics.perShare.eps;
+        const bookValuePerShare = metrics.perShare.bookValuePerShare;
+        const shares = metrics.rawValues.shares;
+        const equity = metrics.rawValues.stockholdersEquity;
+        const netIncome = metrics.rawValues.netIncome;
+        const dividends = metrics.rawValues.dividends;
+        const currentAssets = metrics.rawValues.currentAssets;
+        const totalLiabilities = metrics.rawValues.totalLiabilities;
+        const totalAssets = metrics.rawValues.totalAssets;
+        const operatingIncome = metrics.rawValues.operatingIncome;
+        const totalDebt = metrics.rawValues.totalDebt;
+        const cash = metrics.rawValues.cash;
+        
+        let epsGrowth = 0;
+        let revenueGrowth = 0;
+        let dividendGrowth = 0;
+        
+        if (historicalData.length >= 2) {
+          const currentEPS = historicalData[0].perShare.eps;
+          const oldestEPS = historicalData[historicalData.length - 1].perShare.eps;
+          if (currentEPS && oldestEPS && oldestEPS !== 0) {
+            epsGrowth = ((currentEPS - oldestEPS) / Math.abs(oldestEPS) / (historicalData.length - 1)) * 100;
+          }
+          
+          const currentRev = historicalData[0].rawValues.revenue;
+          const oldestRev = historicalData[historicalData.length - 1].rawValues.revenue;
+          if (currentRev && oldestRev && oldestRev !== 0) {
+            revenueGrowth = ((currentRev - oldestRev) / oldestRev / (historicalData.length - 1)) * 100;
+          }
+          
+          const currentDiv = historicalData[0].rawValues.dividends;
+          const oldestDiv = historicalData[historicalData.length - 1].rawValues.dividends;
+          if (currentDiv && oldestDiv && oldestDiv > 0) {
+            dividendGrowth = ((currentDiv - oldestDiv) / oldestDiv / (historicalData.length - 1)) * 100;
+          }
+        }
+        
+        const dividendYield = dividends > 0 && equity > 0 ? (dividends / equity) * 100 : 0;
+        const dividendPerShare = shares > 0 && dividends > 0 ? dividends / shares : 0;
+        
+        const riskFreeRate = 0.04;
+        const marketRiskPremium = 0.07;
+        const beta = 1.2;
+        const costOfEquity = riskFreeRate + (beta * marketRiskPremium);
+        
+        const marketValueEquity = equity;
+        const marketValueDebt = totalDebt;
+        const totalValue = marketValueEquity + marketValueDebt;
+        const weightEquity = totalValue > 0 ? marketValueEquity / totalValue : 1;
+        const weightDebt = totalValue > 0 ? marketValueDebt / totalValue : 0;
+        const costOfDebt = 0.05;
+        const taxRate = 0.21;
+        const wacc = (weightEquity * costOfEquity) + (weightDebt * costOfDebt * (1 - taxRate));
+        
+        let lynchFairValue = null;
+        if (eps && eps > 0 && (epsGrowth > 0 || revenueGrowth > 0)) {
+          const growthRate = epsGrowth > 0 ? epsGrowth : revenueGrowth;
+          lynchFairValue = eps * (Math.abs(growthRate) + dividendYield);
+        }
+        
+        let grahamNumber = null;
+        if (eps && eps > 0 && bookValuePerShare && bookValuePerShare > 0) {
+          grahamNumber = Math.sqrt(22.5 * eps * bookValuePerShare);
+        }
+        
+        let ddmValue = null;
+        let ddmDetails = null;
+        if (dividendPerShare > 0 && costOfEquity > (dividendGrowth / 100) && dividendGrowth > 0) {
+          const g = dividendGrowth / 100;
+          const D1 = dividendPerShare * (1 + g);
+          ddmValue = D1 / (costOfEquity - g);
+          ddmDetails = {
+            currentDividend: dividendPerShare,
+            nextYearDividend: D1,
+            growthRate: dividendGrowth,
+            requiredReturn: costOfEquity * 100,
+            fairValue: ddmValue
+          };
+        }
+        
+        let epvValue = null;
+        let epvDetails = null;
+        if (operatingIncome > 0 && shares > 0) {
+          const adjustedEarnings = operatingIncome * (1 - taxRate);
+          const epv = adjustedEarnings / wacc;
+          epvValue = epv / shares;
+          epvDetails = {
+            operatingIncome: operatingIncome,
+            taxRate: taxRate * 100,
+            adjustedEarnings: adjustedEarnings,
+            wacc: wacc * 100,
+            totalEPV: epv,
+            perShare: epvValue
+          };
+        }
+        
+        let ncavValue = null;
+        let ncavDetails = null;
+        if (currentAssets > 0 && totalLiabilities > 0 && shares > 0) {
+          const ncav = currentAssets - totalLiabilities;
+          ncavValue = ncav / shares;
+          ncavDetails = {
+            currentAssets: currentAssets,
+            totalLiabilities: totalLiabilities,
+            netCurrentAssets: ncav,
+            perShare: ncavValue,
+            description: "Deep value metric: current assets minus ALL liabilities"
+          };
+        }
+        
+        let pegValue = null;
+        let pegDetails = null;
+        if (eps && eps > 0 && (epsGrowth > 0 || revenueGrowth > 0)) {
+          const growthRate = epsGrowth > 0 ? epsGrowth : revenueGrowth;
+          const fairPEG = 1.0;
+          const fairPE = fairPEG * Math.abs(growthRate);
+          pegValue = eps * fairPE;
+          pegDetails = {
+            eps: eps,
+            growthRate: growthRate,
+            fairPEG: fairPEG,
+            impliedPE: fairPE,
+            fairValue: pegValue
+          };
+        }
+        
+        let residualIncomeValue = null;
+        let residualIncomeDetails = null;
+        if (netIncome > 0 && equity > 0 && shares > 0) {
+          const equityCharge = equity * costOfEquity;
+          const residualIncome = netIncome - equityCharge;
+          
+          const projectionYears = 5;
+          const fadeRate = 0.80;
+          let pvResidualIncome = 0;
+          
+          for (let i = 1; i <= projectionYears; i++) {
+            const projectedRI = residualIncome * Math.pow(fadeRate, i - 1);
+            const pv = projectedRI / Math.pow(1 + costOfEquity, i);
+            pvResidualIncome += pv;
+          }
+          
+          const totalValue = equity + pvResidualIncome;
+          residualIncomeValue = totalValue / shares;
+          
+          residualIncomeDetails = {
+            bookValue: equity,
+            bookValuePerShare: bookValuePerShare,
+            netIncome: netIncome,
+            equityCharge: equityCharge,
+            residualIncome: residualIncome,
+            pvResidualIncome: pvResidualIncome,
+            totalValue: totalValue,
+            perShare: residualIncomeValue,
+            costOfEquity: costOfEquity * 100
+          };
+        }
+        
+        let peBasedValue = null;
+        let peDetails = null;
+        if (eps && eps > 0) {
+          const industryPE = 15;
+          let justifiedPE = industryPE;
+          
+          if (dividendPerShare > 0 && dividends > 0 && netIncome > 0) {
+            const payoutRatio = dividends / netIncome;
+            const g = dividendGrowth > 0 ? dividendGrowth / 100 : 0.05;
+            if (costOfEquity > g) {
+              justifiedPE = payoutRatio * (1 + g) / (costOfEquity - g);
+            }
+          }
+          
+          peBasedValue = eps * justifiedPE;
+          peDetails = {
+            eps: eps,
+            industryPE: industryPE,
+            justifiedPE: justifiedPE,
+            fairValue: peBasedValue,
+            method: dividendPerShare > 0 ? "DDM-derived P/E" : "Industry Average P/E"
+          };
+        }
+        
+        let tangibleBookValue = null;
+        if (totalAssets > 0 && totalLiabilities > 0 && shares > 0) {
+          const estimatedIntangibles = totalAssets * 0.10;
+          const tangibleAssets = totalAssets - estimatedIntangibles;
+          const tangibleEquity = tangibleAssets - totalLiabilities;
+          tangibleBookValue = tangibleEquity / shares;
+        }
+        
+        return {
+          lynch: {
+            fairValue: lynchFairValue,
+            eps,
+            growthRate: epsGrowth > 0 ? epsGrowth : revenueGrowth,
+            dividendYield,
+            applicable: lynchFairValue !== null && lynchFairValue > 0,
+            formula: "EPS × (Growth Rate + Dividend Yield)"
+          },
+          graham: {
+            number: grahamNumber,
+            eps,
+            bookValuePerShare,
+            applicable: grahamNumber !== null && grahamNumber > 0,
+            formula: "√(22.5 × EPS × Book Value Per Share)"
+          },
+          ddm: ddmDetails ? {
+            ...ddmDetails,
+            applicable: true,
+            formula: "D₁ / (r - g)"
+          } : {
+            applicable: false,
+            reason: "Requires positive dividends and positive dividend growth"
+          },
+          epv: epvDetails ? {
+            ...epvDetails,
+            applicable: true,
+            formula: "Adjusted Operating Income / WACC"
+          } : {
+            applicable: false,
+            reason: "Requires positive operating income"
+          },
+          ncav: ncavDetails ? {
+            ...ncavDetails,
+            applicable: true,
+            formula: "(Current Assets - Total Liabilities) / Shares"
+          } : {
+            applicable: false,
+            reason: "Requires positive net current assets"
+          },
+          peg: pegDetails ? {
+            ...pegDetails,
+            applicable: true,
+            formula: "EPS × (PEG × Growth Rate), where PEG = 1.0"
+          } : {
+            applicable: false,
+            reason: "Requires positive EPS and growth"
+          },
+          residualIncome: residualIncomeDetails ? {
+            ...residualIncomeDetails,
+            applicable: true,
+            formula: "Book Value + PV(Residual Incomes)"
+          } : {
+            applicable: false,
+            reason: "Requires positive net income and equity"
+          },
+          peBased: peDetails ? {
+            ...peDetails,
+            applicable: true,
+            formula: "EPS × Justified P/E"
+          } : {
+            applicable: false,
+            reason: "Requires positive EPS"
+          },
+          tangibleBook: {
+            value: tangibleBookValue,
+            applicable: tangibleBookValue !== null && tangibleBookValue > 0,
+            formula: "(Tangible Assets - Liabilities) / Shares"
+          },
+          assumptions: {
+            riskFreeRate: riskFreeRate * 100,
+            marketRiskPremium: marketRiskPremium * 100,
+            beta: beta,
+            costOfEquity: costOfEquity * 100,
+            costOfDebt: costOfDebt * 100,
+            wacc: wacc * 100,
+            taxRate: taxRate * 100
+          }
+        };
+      };
+
       const calculateValuations = (facts, years) => {
         const currentYear = years[0];
         const metrics = calculateMetricsForYear(facts, currentYear);
         
-        // Get multi-year data for growth rates
         const historicalData = years.slice(0, 5).map(year => calculateMetricsForYear(facts, year));
         
-        // Detect if company is profitable
         const isProfitable = metrics.rawValues.netIncome > 0;
         const hasPositiveFCF = metrics.rawValues.freeCashFlow > 0;
         const hasPositiveEBITDA = (metrics.rawValues.operatingIncome + (metrics.rawValues.revenue * 0.05)) > 0;
         
-        // Calculate growth rates
         const revenueGrowth = historicalData.length > 1 ? 
           ((historicalData[0].rawValues.revenue - historicalData[historicalData.length-1].rawValues.revenue) / 
           historicalData[historicalData.length-1].rawValues.revenue / (historicalData.length - 1)) * 100 : 5;
@@ -251,15 +616,12 @@
           ((historicalData[0].rawValues.freeCashFlow - historicalData[historicalData.length-1].rawValues.freeCashFlow) / 
           Math.abs(historicalData[historicalData.length-1].rawValues.freeCashFlow) / (historicalData.length - 1)) * 100 : 5;
         
-        // 1. BOOK VALUE METHOD
         const bookValue = metrics.rawValues.stockholdersEquity;
         const bookValuePerShare = metrics.rawValues.shares > 0 ? metrics.perShare.bookValuePerShare : null;
         
-        // 2. ADJUSTED NET ASSET VALUE
         const adjustedNetAsset = bookValue > 0 ? bookValue * 1.2 : bookValue;
         const adjustedNetAssetPerShare = bookValuePerShare && bookValuePerShare > 0 ? bookValuePerShare * 1.2 : bookValuePerShare;
         
-        // 3. DCF VALUATION (only if FCF is positive or can be projected to positive)
         let dcfValuation = null;
         if (hasPositiveFCF || (metrics.rawValues.revenue > 0 && revenueGrowth > 10)) {
           const wacc = 0.10;
@@ -267,8 +629,8 @@
           const projectionYears = 5;
           
           const projectedFCF = [];
-          let currentFCF = hasPositiveFCF ? metrics.rawValues.freeCashFlow : metrics.rawValues.revenue * 0.1; // Assume 10% FCF margin in future
-          const projectedGrowthRate = Math.min(Math.max(hasPositiveFCF ? fcfGrowth / 100 : 0.20, 0.05), 0.30); // 5-30% cap
+          let currentFCF = hasPositiveFCF ? metrics.rawValues.freeCashFlow : metrics.rawValues.revenue * 0.1;
+          const projectedGrowthRate = Math.min(Math.max(hasPositiveFCF ? fcfGrowth / 100 : 0.20, 0.05), 0.30);
           
           for (let i = 1; i <= projectionYears; i++) {
             currentFCF = currentFCF * (1 + projectedGrowthRate);
@@ -303,17 +665,14 @@
           };
         }
         
-        // 4. REVENUE MULTIPLE VALUATION (for unprofitable high-growth companies)
         const revenueMultipleValuation = {
           applicable: !isProfitable && metrics.rawValues.revenue > 0,
           description: "Revenue-based valuation for growth companies"
         };
         
         if (revenueMultipleValuation.applicable) {
-          // Use industry-specific multiples (these are approximations)
-          let assumedRevenueMultiple = 3.0; // Default conservative
+          let assumedRevenueMultiple = 3.0;
           
-          // Adjust based on growth rate
           if (revenueGrowth > 50) assumedRevenueMultiple = 8.0;
           else if (revenueGrowth > 30) assumedRevenueMultiple = 6.0;
           else if (revenueGrowth > 15) assumedRevenueMultiple = 4.0;
@@ -328,7 +687,6 @@
           revenueMultipleValuation.revenueGrowth = revenueGrowth;
         }
         
-        // 5. DIVIDEND DISCOUNT MODEL (only if dividends exist and profitable)
         const dividendYield = metrics.rawValues.dividends > 0 && metrics.rawValues.stockholdersEquity > 0 ?
           (metrics.rawValues.dividends / metrics.rawValues.stockholdersEquity) : 0;
         const assumedDividendGrowth = 0.05;
@@ -341,7 +699,6 @@
           ddmValue = (currentDividendPerShare * (1 + assumedDividendGrowth)) / (costOfEquity - assumedDividendGrowth);
         }
         
-        // 6. EXCESS EARNINGS METHOD (only for profitable companies)
         let excessEarningsValuation = null;
         if (isProfitable) {
           const normalReturnOnAssets = 0.08;
@@ -360,7 +717,6 @@
           };
         }
         
-        // 7. COMPARABLE MULTIPLES (only for profitable companies)
         let comparablesValuation = null;
         if (isProfitable) {
           const assumedPEMultiple = 15;
@@ -381,7 +737,6 @@
           };
         }
         
-        // Calculate average (only including valid valuations)
         const validEquityValues = [];
         const validPerShareValues = [];
         
@@ -460,10 +815,8 @@
         const currentYear = years[0];
         const metrics = calculateMetricsForYear(facts, currentYear);
         
-        // Calculate EBITDA
         const ebitda = metrics.rawValues.operatingIncome + (metrics.rawValues.revenue * 0.05);
         
-        // Check if LBO is viable
         if (ebitda <= 0) {
           return {
             applicable: false,
@@ -483,7 +836,6 @@
           };
         }
         
-        // LBO Assumptions
         const purchaseMultiple = 8.0;
         const exitMultiple = 9.0;
         const debtMultiple = 5.0;
@@ -491,12 +843,10 @@
         const interestRate = 0.065;
         const holdingPeriod = 5;
         
-        // Purchase Price
         const purchasePrice = ebitda * purchaseMultiple;
         const debtFinancing = Math.min(ebitda * debtMultiple, purchasePrice * (1 - equityContribution));
         const equityInvestment = purchasePrice - debtFinancing;
         
-        // Project financials
         const projections = [];
         let remainingDebt = debtFinancing;
         const growthRate = 0.05;
@@ -521,13 +871,11 @@
           });
         }
         
-        // Exit Analysis
         const exitEBITDA = projections[projections.length - 1].ebitda;
         const exitEnterpriseValue = exitEBITDA * exitMultiple;
         const exitDebt = projections[projections.length - 1].debtBalance;
         const exitEquityValue = exitEnterpriseValue - exitDebt;
         
-        // Returns Calculation
         const moic = exitEquityValue / equityInvestment;
         const irr = (Math.pow(moic, 1 / holdingPeriod) - 1) * 100;
         
@@ -566,22 +914,30 @@
       };
 
       const calculateMetricsForYear = (facts, year) => {
-        // Track data sources for transparency
         const dataSources = {};
         
-        // Income Statement - try multiple concepts
+        // EXPANDED revenue concepts
         const revenue = getValueWithFallback(facts, [
           'Revenues',
           'RevenueFromContractWithCustomerExcludingAssessedTax',
           'SalesRevenueNet',
-          'RevenueFromContractWithCustomerIncludingAssessedTax'
+          'RevenueFromContractWithCustomerIncludingAssessedTax',
+          'SalesRevenueGoodsNet',
+          'SalesRevenueServicesNet',
+          'RegulatedAndUnregulatedOperatingRevenue',
+          'OilAndGasRevenue',
+          'InterestAndDividendIncomeOperating',
+          'InterestIncomeOperating',
+          'TotalRevenues',
+          'Revenue'
         ], year);
         dataSources.revenue = revenue.concept;
         
         const costOfRevenue = getValueWithFallback(facts, [
           'CostOfRevenue',
           'CostOfGoodsAndServicesSold',
-          'CostOfGoodsSold'
+          'CostOfGoodsSold',
+          'CostOfSales'
         ], year);
         dataSources.costOfRevenue = costOfRevenue.concept;
         
@@ -590,13 +946,15 @@
         
         const operatingIncome = getValueWithFallback(facts, [
           'OperatingIncomeLoss',
-          'IncomeLossFromOperations'
+          'IncomeLossFromOperations',
+          'IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments'
         ], year);
         dataSources.operatingIncome = operatingIncome.concept;
         
         const netIncome = getValueWithFallback(facts, [
           'NetIncomeLoss',
-          'ProfitLoss'
+          'ProfitLoss',
+          'NetIncomeLossAvailableToCommonStockholdersBasic'
         ], year);
         dataSources.netIncome = netIncome.concept;
         
@@ -623,7 +981,6 @@
           'IncomeTaxesPaid'
         ], year);
         
-        // Balance Sheet
         const totalAssets = getValueWithFallback(facts, ['Assets'], year);
         dataSources.totalAssets = totalAssets.concept;
         
@@ -652,7 +1009,6 @@
         const currentLiabilities = getValueWithFallback(facts, ['LiabilitiesCurrent'], year);
         dataSources.currentLiabilities = currentLiabilities.concept;
         
-        // IMPROVED DEBT CALCULATION - Only interest-bearing debt
         const longTermDebt = getValueWithFallback(facts, [
           'LongTermDebt',
           'LongTermDebtNoncurrent',
@@ -667,7 +1023,6 @@
         ], year);
         dataSources.shortTermDebt = shortTermDebt.concept;
         
-        // Calculate total interest-bearing debt
         const totalDebt = (longTermDebt?.val || 0) + (shortTermDebt?.val || 0);
         
         const stockholdersEquity = getValueWithFallback(facts, [
@@ -676,7 +1031,6 @@
         ], year);
         dataSources.stockholdersEquity = stockholdersEquity.concept;
         
-        // Cash Flow
         const operatingCashFlow = getValueWithFallback(facts, [
           'NetCashProvidedByUsedInOperatingActivities'
         ], year);
@@ -701,18 +1055,16 @@
           'DividendsPaid'
         ], year);
         
-        // Shares
         const commonShares = getValueWithFallback(facts, [
           'CommonStockSharesOutstanding',
-          'SharesOutstanding'
+          'SharesOutstanding',
+          'WeightedAverageNumberOfSharesOutstandingBasic'
         ], year, 'shares');
         dataSources.shares = commonShares.concept;
         
-        // Extract values
         const revenueVal = revenue?.val || 0;
         const costOfRevenueVal = costOfRevenue?.val || 0;
         
-        // Calculate or use reported gross profit
         let grossProfitVal = grossProfit?.val;
         let grossProfitCalculated = false;
         if (!grossProfitVal && revenueVal && costOfRevenueVal) {
@@ -725,7 +1077,6 @@
         const interestExpenseVal = interestExpense?.val || 0;
         const taxExpenseVal = taxExpense?.val || 0;
         
-        // Calculate EBIT (Earnings Before Interest & Taxes)
         let ebitVal = netIncomeVal + interestExpenseVal + taxExpenseVal;
         
         const totalAssetsVal = totalAssets?.val || 0;
@@ -750,53 +1101,42 @@
         
         const sharesVal = commonShares?.val || 0;
 
-        // Calculate ALL the metrics
-        // Profitability Ratios
         const grossMargin = revenueVal !== 0 && grossProfitVal ? (grossProfitVal / revenueVal) * 100 : null;
         const operatingMargin = revenueVal !== 0 ? (operatingIncomeVal / revenueVal) * 100 : null;
         const netMargin = revenueVal !== 0 ? (netIncomeVal / revenueVal) * 100 : null;
         const roe = equityVal !== 0 ? (netIncomeVal / equityVal) * 100 : null;
         const roa = totalAssetsVal !== 0 ? (netIncomeVal / totalAssetsVal) * 100 : null;
         
-        // ROIC = NOPAT / Invested Capital
-        // NOPAT = Operating Income * (1 - Tax Rate)
-        // Invested Capital = Debt + Equity
         const taxRate = (netIncomeVal + taxExpenseVal) !== 0 ? taxExpenseVal / (netIncomeVal + taxExpenseVal) : 0.21;
         const nopat = operatingIncomeVal * (1 - taxRate);
         const investedCapital = totalDebtVal + equityVal;
         const roic = investedCapital !== 0 ? (nopat / investedCapital) * 100 : null;
         
-        // Liquidity Ratios
         const currentRatio = currentLiabilitiesVal !== 0 ? currentAssetsVal / currentLiabilitiesVal : null;
         const quickRatio = currentLiabilitiesVal !== 0 ? (currentAssetsVal - inventoriesVal) / currentLiabilitiesVal : null;
         const cashRatio = currentLiabilitiesVal !== 0 ? cashVal / currentLiabilitiesVal : null;
         
-        // Leverage Ratios - Using interest-bearing debt only
         const debtToEquity = equityVal !== 0 ? totalDebtVal / equityVal : null;
         const debtToAssets = totalAssetsVal !== 0 ? totalDebtVal / totalAssetsVal : null;
         const equityMultiplier = equityVal !== 0 ? totalAssetsVal / equityVal : null;
         const interestCoverage = interestExpenseVal !== 0 && ebitVal ? ebitVal / interestExpenseVal : null;
         
-        // Efficiency Ratios
         const assetTurnover = totalAssetsVal !== 0 ? revenueVal / totalAssetsVal : null;
         const inventoryTurnover = inventoriesVal !== 0 ? costOfRevenueVal / inventoriesVal : null;
         const receivablesTurnover = accountsReceivableVal !== 0 ? revenueVal / accountsReceivableVal : null;
         const daysSalesOutstanding = receivablesTurnover !== 0 && receivablesTurnover ? 365 / receivablesTurnover : null;
         const daysInventoryOutstanding = inventoryTurnover !== 0 && inventoryTurnover ? 365 / inventoryTurnover : null;
         
-        // Cash Flow Metrics
         const freeCashFlow = ocfVal - capexVal;
         const fcfMargin = revenueVal !== 0 ? (freeCashFlow / revenueVal) * 100 : null;
         const ocfToNetIncome = netIncomeVal !== 0 ? ocfVal / netIncomeVal : null;
         const cashFlowToDebt = totalDebtVal !== 0 ? ocfVal / totalDebtVal : null;
         
-        // Per Share Metrics
         const eps = sharesVal !== 0 ? netIncomeVal / sharesVal : null;
         const bookValuePerShare = sharesVal !== 0 ? equityVal / sharesVal : null;
         const cashPerShare = sharesVal !== 0 ? cashVal / sharesVal : null;
         const fcfPerShare = sharesVal !== 0 ? freeCashFlow / sharesVal : null;
 
-        // Data quality score
         const dataQuality = {
           score: 0,
           total: 0,
@@ -917,10 +1257,13 @@
         setAvailableYears([]);
         setSelectedYear('');
         setAnalysis(null);
+        setActiveTab('overview');
+        setDebugInfo(null);
 
         try {
+            console.log(`Fetching data for ticker: ${ticker}`);
             const cik = await getCIKFromTicker(ticker.trim());
-            if (!cik) throw new Error('Ticker symbol not found');
+            console.log(`Found CIK: ${cik}`);
 
             const apiUrl = `http://localhost:3000/api/company-facts/${cik}`;
             const response = await fetch(apiUrl, {
@@ -930,15 +1273,32 @@
             });
             
             if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.message || 'Failed to fetch company data');
+              const errorData = await response.json().catch(() => ({}));
+              const errorMessage = errorData.message || errorData.error || `HTTP ${response.status}: Failed to fetch company data`;
+              console.error('API Error:', errorMessage, errorData);
+              throw new Error(errorMessage + '\n\nThis could mean:\n- The SEC API is rate-limiting requests\n- The company has incomplete XBRL data\n- Network or CORS issues');
             }
 
             const data = await response.json();
-            const facts = data.facts['us-gaap'];
-            const years = getAvailableYears(facts);
+            console.log('Received company data:', data.entityName);
             
-            if (years.length === 0) throw new Error('No annual financial data found');
+            const facts = data.facts['us-gaap'];
+            if (!facts) {
+              throw new Error('No US-GAAP data found for this company. The company may not file standard XBRL reports.');
+            }
+            
+            const years = getAvailableYears(facts);
+            console.log('Available years:', years);
+            
+            if (years.length === 0) {
+              // Set debug info to help troubleshoot
+              const availableConcepts = Object.keys(facts).slice(0, 20);
+              setDebugInfo({
+                availableConcepts,
+                message: 'No 10-K annual data found. Available XBRL concepts (first 20):'
+              });
+              throw new Error('No annual financial data (10-K) found for this company.\n\nPossible reasons:\n- Company only has quarterly filings (10-Q)\n- Company uses non-standard XBRL tags\n- Recent IPO with limited filing history\n\nCheck the Debug Info below for available data concepts.');
+            }
             
             setCompanyData(data);
             setAvailableYears(years);
@@ -950,15 +1310,16 @@
             ...metrics
             });
             
-            // Calculate valuations
             const valuationResults = calculateValuations(facts, years);
             setValuations(valuationResults);
             
-            // Calculate LBO model
             const lboResults = calculateLBO(facts, years);
             setLboModel(lboResults);
+            
+            const historicalData = years.slice(0, 5).map(year => calculateMetricsForYear(facts, year));
+            const fairValueResults = calculateFairValue(metrics, historicalData);
+            setFairValue(fairValueResults);
 
-            // Calculate year-over-year comparison if we have multiple years
             if (years.length > 1) {
             const prevYearMetrics = calculateMetricsForYear(facts, years[1]);
             setYearComparison({
@@ -986,13 +1347,15 @@
           ...metrics
         });
         
-        // Recalculate valuations for selected year
         const yearIndex = availableYears.indexOf(parseInt(year));
         const relevantYears = availableYears.slice(yearIndex);
         setValuations(calculateValuations(facts, relevantYears));
         setLboModel(calculateLBO(facts, relevantYears));
+        
+        const historicalData = relevantYears.slice(0, 5).map(y => calculateMetricsForYear(facts, y));
+        const fairValueResults = calculateFairValue(metrics, historicalData);
+        setFairValue(fairValueResults);
 
-        // Update comparison
         const yearIndexComp = availableYears.indexOf(parseInt(year));
         if (yearIndexComp < availableYears.length - 1) {
           const prevYear = availableYears[yearIndexComp + 1];
@@ -1062,8 +1425,20 @@
         );
       };
 
+      const FairValueCard = ({ title, method, children }) => (
+        <div className="fair-value-card rounded-lg p-6">
+          <div className="flex items-start justify-between mb-4">
+            <div>
+              <h4 className="text-lg font-light text-white mb-1">{title}</h4>
+              <p className="text-xs text-gray-600 font-light uppercase tracking-wider">{method}</p>
+            </div>
+          </div>
+          {children}
+        </div>
+      );
+
       useEffect(() => {
-        if (analysis && availableYears.length > 0) {
+        if (analysis && availableYears.length > 0 && activeTab === 'charts') {
           createTrendCharts();
         }
         
@@ -1072,7 +1447,7 @@
             if (chart) chart.destroy();
           });
         };
-      }, [analysis, availableYears]);
+      }, [analysis, availableYears, activeTab]);
 
       const createTrendCharts = () => {
         if (!companyData || availableYears.length < 2) return;
@@ -1418,7 +1793,6 @@
 
       return (
         <div className="min-h-screen bg-black p-6">
-        {/* Credentials Modal */}
         {showCredentialsModal && (
             <div className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-50 p-4">
             <div className="bg-zinc-950 border border-zinc-800 rounded-lg max-w-md w-full p-8">
@@ -1480,7 +1854,6 @@
         )}
 
         <div className="max-w-7xl mx-auto">
-            {/* Header */}
             <div className="mb-12">
             <h1 className="text-5xl font-light text-white mb-3 tracking-tight">
                 SEC Financial Analyzer
@@ -1499,7 +1872,6 @@
             )}
             </div>
 
-            {/* Search Bar */}
             <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-8">
               <div className="flex gap-3">
                 <input
@@ -1544,18 +1916,33 @@
               )}
 
               {error && (
-                <div className="mt-4 p-4 bg-red-950 border border-red-900 rounded flex items-center gap-2 text-red-300 font-light">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  <span>{error}</span>
+                <div className="mt-4 p-4 bg-red-950 border border-red-900 rounded">
+                  <div className="flex items-start gap-2 text-red-300 font-light">
+                    <svg className="w-5 h-5 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <div className="flex-1">
+                      <pre className="whitespace-pre-wrap text-sm">{error}</pre>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              {debugInfo && (
+                <div className="mt-4 p-4 bg-yellow-950 border border-yellow-900 rounded">
+                  <h4 className="text-sm font-medium text-yellow-400 mb-2">Debug Information</h4>
+                  <p className="text-xs text-yellow-300 mb-2">{debugInfo.message}</p>
+                  <div className="text-xs text-yellow-200 font-mono">
+                    {debugInfo.availableConcepts.map(concept => (
+                      <div key={concept} className="ml-2">• {concept}</div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
 
             {analysis && (
               <>
-                {/* Company Header with Data Quality */}
                 <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-8">
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
@@ -1586,7 +1973,6 @@
                     </div>
                   </div>
                   
-                  {/* Important Note about Debt */}
                   <div className="mt-4 p-3 bg-zinc-900 border border-zinc-800 rounded">
                     <p className="text-sm text-gray-400 font-light">
                       <strong className="text-gray-300">Note:</strong> {analysis.notes.debtDefinition}
@@ -1595,7 +1981,6 @@
                   </div>
                 </div>
 
-                {/* Data Sources Panel */}
                 {showDataSources && (
                   <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-8">
                     <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-4">Data Sources (XBRL Concepts)</h3>
@@ -1611,331 +1996,855 @@
                   </div>
                 )}
 
-                {/* Key Financials Overview */}
-                <div className="mb-8 section-divider">
-                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Key Financial Statements</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <MetricCard title="Revenue" value={analysis.rawValues.revenue} />
-                    <MetricCard 
-                      title="Gross Profit" 
-                      value={analysis.rawValues.grossProfit}
-                      note={analysis.notes.grossProfitCalculated ? "Calculated" : "Reported"}
-                    />
-                    <MetricCard title="Operating Income" value={analysis.rawValues.operatingIncome} />
-                    <MetricCard title="Net Income" value={analysis.rawValues.netIncome} />
-                    <MetricCard title="Total Assets" value={analysis.rawValues.totalAssets} />
-                    <MetricCard 
-                      title="Total Debt (Interest-bearing)" 
-                      value={analysis.rawValues.totalDebt}
-                      subtitle={`LT: ${formatNumber(analysis.rawValues.longTermDebt)} + ST: ${formatNumber(analysis.rawValues.shortTermDebt)}`}
-                    />
-                    <MetricCard title="Stockholders Equity" value={analysis.rawValues.stockholdersEquity} />
-                    <MetricCard title="Cash & Equivalents" value={analysis.rawValues.cash} />
+                <div className="bg-zinc-950 border border-zinc-900 rounded-lg mb-8 overflow-hidden">
+                  <div className="flex border-b border-zinc-800 overflow-x-auto">
+                    <button
+                      onClick={() => setActiveTab('overview')}
+                      className={`tab-button ${activeTab === 'overview' ? 'active' : ''}`}
+                    >
+                      OVERVIEW
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('fairvalue')}
+                      className={`tab-button ${activeTab === 'fairvalue' ? 'active' : ''}`}
+                    >
+                      FAIR VALUE
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('valuations')}
+                      className={`tab-button ${activeTab === 'valuations' ? 'active' : ''}`}
+                    >
+                      VALUATIONS
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('lbo')}
+                      className={`tab-button ${activeTab === 'lbo' ? 'active' : ''}`}
+                    >
+                      LBO ANALYSIS
+                    </button>
+                    {availableYears.length > 1 && (
+                      <button
+                        onClick={() => setActiveTab('charts')}
+                        className={`tab-button ${activeTab === 'charts' ? 'active' : ''}`}
+                      >
+                        CHARTS
+                      </button>
+                    )}
                   </div>
-                </div>
 
-                {/* Profitability Metrics */}
-                <div className="mb-8 section-divider">
-                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Profitability Metrics</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    <MetricCard 
-                      title="Gross Margin" 
-                      value={analysis.profitability.grossMargin} 
-                      format="percent"
-                      status={getHealthStatus(analysis.profitability.grossMargin, {good: 40, neutral: 25})}
-                      note={analysis.notes.grossProfitCalculated ? "Calculated from Revenue - COGS" : undefined}
-                    />
-                    <MetricCard 
-                      title="Operating Margin" 
-                      value={analysis.profitability.operatingMargin} 
-                      format="percent"
-                      status={getHealthStatus(analysis.profitability.operatingMargin, {good: 20, neutral: 10})}
-                      subtitle="Operating Income / Revenue"
-                    />
-                    <MetricCard 
-                      title="Net Profit Margin" 
-                      value={analysis.profitability.netMargin} 
-                      format="percent"
-                      status={getHealthStatus(analysis.profitability.netMargin, {good: 15, neutral: 5})}
-                      subtitle="Net Income / Revenue"
-                    />
-                    <MetricCard 
-                      title="Return on Equity (ROE)" 
-                      value={analysis.profitability.roe} 
-                      format="percent"
-                      status={getHealthStatus(analysis.profitability.roe, {good: 15, neutral: 8})}
-                      subtitle="Net Income / Equity"
-                    />
-                    <MetricCard 
-                      title="Return on Assets (ROA)" 
-                      value={analysis.profitability.roa} 
-                      format="percent"
-                      status={getHealthStatus(analysis.profitability.roa, {good: 10, neutral: 5})}
-                      subtitle="Net Income / Total Assets"
-                    />
-                    <MetricCard 
-                      title="Return on Invested Capital" 
-                      value={analysis.profitability.roic} 
-                      format="percent"
-                      status={getHealthStatus(analysis.profitability.roic, {good: 12, neutral: 6})}
-                      subtitle="NOPAT / (Debt + Equity)"
-                    />
-                  </div>
-                </div>
-
-                {/* Liquidity Metrics */}
-                <div className="mb-8 section-divider">
-                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Liquidity Metrics</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    <MetricCard 
-                      title="Current Ratio" 
-                      value={analysis.liquidity.currentRatio} 
-                      format="ratio"
-                      status={getHealthStatus(analysis.liquidity.currentRatio, {good: 1.5, neutral: 1})}
-                      subtitle="Current Assets / Current Liabilities"
-                    />
-                    <MetricCard 
-                      title="Quick Ratio" 
-                      value={analysis.liquidity.quickRatio} 
-                      format="ratio"
-                      status={getHealthStatus(analysis.liquidity.quickRatio, {good: 1.2, neutral: 0.8})}
-                      subtitle="(Current Assets - Inventory) / Current Liab."
-                    />
-                    <MetricCard 
-                      title="Cash Ratio" 
-                      value={analysis.liquidity.cashRatio} 
-                      format="ratio"
-                      status={getHealthStatus(analysis.liquidity.cashRatio, {good: 0.5, neutral: 0.2})}
-                      subtitle="Cash / Current Liabilities"
-                    />
-                  </div>
-                </div>
-
-                {/* Leverage Metrics */}
-                <div className="mb-8 section-divider">
-                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Leverage & Solvency</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <MetricCard 
-                      title="Debt-to-Equity" 
-                      value={analysis.leverage.debtToEquity} 
-                      format="ratio"
-                      status={getHealthStatusInverse(analysis.leverage.debtToEquity, {good: 1, neutral: 2})}
-                      subtitle="Interest-bearing Debt / Equity"
-                    />
-                    <MetricCard 
-                      title="Debt-to-Assets" 
-                      value={analysis.leverage.debtToAssets} 
-                      format="ratio"
-                      status={getHealthStatusInverse(analysis.leverage.debtToAssets, {good: 0.3, neutral: 0.5})}
-                      subtitle="Interest-bearing Debt / Total Assets"
-                    />
-                    <MetricCard 
-                      title="Equity Multiplier" 
-                      value={analysis.leverage.equityMultiplier} 
-                      format="ratio"
-                      status={getHealthStatusInverse(analysis.leverage.equityMultiplier, {good: 2, neutral: 3})}
-                      subtitle="Total Assets / Equity"
-                    />
-                    <MetricCard 
-                      title="Interest Coverage" 
-                      value={analysis.leverage.interestCoverage} 
-                      format="ratio"
-                      status={getHealthStatus(analysis.leverage.interestCoverage, {good: 5, neutral: 2.5})}
-                      subtitle="EBIT / Interest Expense"
-                    />
-                  </div>
-                </div>
-
-                {/* Efficiency Metrics */}
-                <div className="mb-8 section-divider">
-                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Efficiency Metrics</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    <MetricCard 
-                      title="Asset Turnover" 
-                      value={analysis.efficiency.assetTurnover} 
-                      format="ratio"
-                      status={getHealthStatus(analysis.efficiency.assetTurnover, {good: 1, neutral: 0.5})}
-                      subtitle="Revenue / Total Assets"
-                    />
-                    <MetricCard 
-                      title="Inventory Turnover" 
-                      value={analysis.efficiency.inventoryTurnover} 
-                      format="ratio"
-                      status={getHealthStatus(analysis.efficiency.inventoryTurnover, {good: 6, neutral: 3})}
-                      subtitle="COGS / Inventory"
-                    />
-                    <MetricCard 
-                      title="Receivables Turnover" 
-                      value={analysis.efficiency.receivablesTurnover} 
-                      format="ratio"
-                      status={getHealthStatus(analysis.efficiency.receivablesTurnover, {good: 10, neutral: 6})}
-                      subtitle="Revenue / Accounts Receivable"
-                    />
-                    <MetricCard 
-                      title="Days Sales Outstanding" 
-                      value={analysis.efficiency.daysSalesOutstanding} 
-                      format="ratio"
-                      status={getHealthStatusInverse(analysis.efficiency.daysSalesOutstanding, {good: 30, neutral: 60})}
-                      subtitle="Days to collect receivables"
-                    />
-                    <MetricCard 
-                      title="Days Inventory Outstanding" 
-                      value={analysis.efficiency.daysInventoryOutstanding} 
-                      format="ratio"
-                      status={getHealthStatusInverse(analysis.efficiency.daysInventoryOutstanding, {good: 30, neutral: 60})}
-                      subtitle="Days to sell inventory"
-                    />
-                  </div>
-                </div>
-
-                {/* Cash Flow Metrics */}
-                <div className="mb-8 section-divider">
-                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Cash Flow Metrics</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <MetricCard 
-                      title="Operating Cash Flow" 
-                      value={analysis.rawValues.operatingCashFlow}
-                    />
-                    <MetricCard 
-                      title="Free Cash Flow" 
-                      value={analysis.rawValues.freeCashFlow}
-                      subtitle="OCF - CapEx"
-                    />
-                    <MetricCard 
-                      title="FCF Margin" 
-                      value={analysis.cashFlow.fcfMargin} 
-                      format="percent"
-                      status={getHealthStatus(analysis.cashFlow.fcfMargin, {good: 15, neutral: 8})}
-                      subtitle="FCF / Revenue"
-                    />
-                    <MetricCard 
-                      title="OCF to Net Income" 
-                      value={analysis.cashFlow.ocfToNetIncome} 
-                      format="ratio"
-                      status={getHealthStatus(analysis.cashFlow.ocfToNetIncome, {good: 1.2, neutral: 0.8})}
-                      subtitle="Quality of earnings"
-                    />
-                    <MetricCard 
-                      title="Cash Flow to Debt" 
-                      value={analysis.cashFlow.cashFlowToDebt} 
-                      format="ratio"
-                      status={getHealthStatus(analysis.cashFlow.cashFlowToDebt, {good: 0.25, neutral: 0.15})}
-                      subtitle="OCF / Total Debt"
-                    />
-                    <MetricCard 
-                      title="CapEx" 
-                      value={analysis.rawValues.capex}
-                      subtitle="Capital Expenditures"
-                    />
-                  </div>
-                </div>
-
-                {/* Per Share Metrics */}
-                <div className="mb-8 section-divider">
-                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Per Share Metrics</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <MetricCard 
-                      title="Earnings Per Share" 
-                      value={analysis.perShare.eps}
-                      subtitle={`${formatNumber(analysis.rawValues.shares)} shares outstanding`}
-                    />
-                    <MetricCard 
-                      title="Book Value Per Share" 
-                      value={analysis.perShare.bookValuePerShare}
-                      subtitle="Equity / Shares"
-                    />
-                    <MetricCard 
-                      title="Cash Per Share" 
-                      value={analysis.perShare.cashPerShare}
-                      subtitle="Cash / Shares"
-                    />
-                    <MetricCard 
-                      title="FCF Per Share" 
-                      value={analysis.perShare.fcfPerShare}
-                      subtitle="Free Cash Flow / Shares"
-                    />
-                  </div>
-                </div>
-
-                {/* Advanced Analysis Toggle */}
-                <div className="mb-8 flex justify-center">
-                  <button
-                    onClick={() => setShowAdvanced(!showAdvanced)}
-                    className="px-6 py-3 bg-zinc-900 hover:bg-zinc-800 text-white rounded border border-zinc-800 transition-colors font-light tracking-wide"
-                  >
-                    {showAdvanced ? 'Hide' : 'Show'} Advanced Analysis (Valuations & LBO)
-                  </button>
-                </div>
-
-                {/* VALUATIONS SECTION */}
-                {showAdvanced && valuations && (
-                  <>
-                    <div className="mb-8 section-divider">
-                      <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Company Valuation Methods</h3>
-                      
-                      {/* Company Stage Indicator */}
-                      <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-6">
-                        <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Company Profile</h4>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                          <div>
-                            <span className="text-gray-600">Stage:</span>
-                            <span className={`ml-2 font-medium ${
-                              valuations.companyStage.stage.includes('High-Growth') ? 'text-blue-400' :
-                              valuations.companyStage.stage.includes('Early-Stage') ? 'text-yellow-400' : 'text-green-400'
-                            }`}>
-                              {valuations.companyStage.stage}
-                            </span>
+                  <div className="p-6">
+                    {activeTab === 'overview' && (
+                      <div className="space-y-8">
+                        <div>
+                          <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Key Financial Statements</h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                            <MetricCard title="Revenue" value={analysis.rawValues.revenue} />
+                            <MetricCard 
+                              title="Gross Profit" 
+                              value={analysis.rawValues.grossProfit}
+                              note={analysis.notes.grossProfitCalculated ? "Calculated" : "Reported"}
+                            />
+                            <MetricCard title="Operating Income" value={analysis.rawValues.operatingIncome} />
+                            <MetricCard title="Net Income" value={analysis.rawValues.netIncome} />
+                            <MetricCard title="Total Assets" value={analysis.rawValues.totalAssets} />
+                            <MetricCard 
+                              title="Total Debt (Interest-bearing)" 
+                              value={analysis.rawValues.totalDebt}
+                              subtitle={`LT: ${formatNumber(analysis.rawValues.longTermDebt)} + ST: ${formatNumber(analysis.rawValues.shortTermDebt)}`}
+                            />
+                            <MetricCard title="Stockholders Equity" value={analysis.rawValues.stockholdersEquity} />
+                            <MetricCard title="Cash & Equivalents" value={analysis.rawValues.cash} />
                           </div>
-                          <div>
-                            <span className="text-gray-600">Profitable:</span>
-                            <span className={`ml-2 ${valuations.companyStage.isProfitable ? 'text-green-400' : 'text-red-400'}`}>
-                              {valuations.companyStage.isProfitable ? 'Yes' : 'No'}
-                            </span>
+                        </div>
+
+                        <div>
+                          <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Profitability Metrics</h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            <MetricCard 
+                              title="Gross Margin" 
+                              value={analysis.profitability.grossMargin} 
+                              format="percent"
+                              status={getHealthStatus(analysis.profitability.grossMargin, {good: 40, neutral: 25})}
+                            />
+                            <MetricCard 
+                              title="Operating Margin" 
+                              value={analysis.profitability.operatingMargin} 
+                              format="percent"
+                              status={getHealthStatus(analysis.profitability.operatingMargin, {good: 20, neutral: 10})}
+                            />
+                            <MetricCard 
+                              title="Net Profit Margin" 
+                              value={analysis.profitability.netMargin} 
+                              format="percent"
+                              status={getHealthStatus(analysis.profitability.netMargin, {good: 15, neutral: 5})}
+                            />
+                            <MetricCard 
+                              title="ROE" 
+                              value={analysis.profitability.roe} 
+                              format="percent"
+                              status={getHealthStatus(analysis.profitability.roe, {good: 15, neutral: 8})}
+                            />
+                            <MetricCard 
+                              title="ROA" 
+                              value={analysis.profitability.roa} 
+                              format="percent"
+                              status={getHealthStatus(analysis.profitability.roa, {good: 10, neutral: 5})}
+                            />
+                            <MetricCard 
+                              title="ROIC" 
+                              value={analysis.profitability.roic} 
+                              format="percent"
+                              status={getHealthStatus(analysis.profitability.roic, {good: 12, neutral: 6})}
+                            />
                           </div>
-                          <div>
-                            <span className="text-gray-600">Positive FCF:</span>
-                            <span className={`ml-2 ${valuations.companyStage.hasPositiveFCF ? 'text-green-400' : 'text-red-400'}`}>
-                              {valuations.companyStage.hasPositiveFCF ? 'Yes' : 'No'}
-                            </span>
+                        </div>
+
+                        <div>
+                          <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Liquidity Metrics</h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            <MetricCard 
+                              title="Current Ratio" 
+                              value={analysis.liquidity.currentRatio} 
+                              format="ratio"
+                              status={getHealthStatus(analysis.liquidity.currentRatio, {good: 1.5, neutral: 1})}
+                            />
+                            <MetricCard 
+                              title="Quick Ratio" 
+                              value={analysis.liquidity.quickRatio} 
+                              format="ratio"
+                              status={getHealthStatus(analysis.liquidity.quickRatio, {good: 1.2, neutral: 0.8})}
+                            />
+                            <MetricCard 
+                              title="Cash Ratio" 
+                              value={analysis.liquidity.cashRatio} 
+                              format="ratio"
+                              status={getHealthStatus(analysis.liquidity.cashRatio, {good: 0.5, neutral: 0.2})}
+                            />
                           </div>
-                          <div>
-                            <span className="text-gray-600">Revenue Growth:</span>
-                            <span className={`ml-2 ${valuations.companyStage.revenueGrowth > 20 ? 'text-green-400' : 'text-gray-400'}`}>
-                              {formatPercent(valuations.companyStage.revenueGrowth)}
-                            </span>
+                        </div>
+
+                        <div>
+                          <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Leverage & Solvency</h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                            <MetricCard 
+                              title="Debt-to-Equity" 
+                              value={analysis.leverage.debtToEquity} 
+                              format="ratio"
+                              status={getHealthStatusInverse(analysis.leverage.debtToEquity, {good: 1, neutral: 2})}
+                            />
+                            <MetricCard 
+                              title="Debt-to-Assets" 
+                              value={analysis.leverage.debtToAssets} 
+                              format="ratio"
+                              status={getHealthStatusInverse(analysis.leverage.debtToAssets, {good: 0.3, neutral: 0.5})}
+                            />
+                            <MetricCard 
+                              title="Equity Multiplier" 
+                              value={analysis.leverage.equityMultiplier} 
+                              format="ratio"
+                              status={getHealthStatusInverse(analysis.leverage.equityMultiplier, {good: 2, neutral: 3})}
+                            />
+                            <MetricCard 
+                              title="Interest Coverage" 
+                              value={analysis.leverage.interestCoverage} 
+                              format="ratio"
+                              status={getHealthStatus(analysis.leverage.interestCoverage, {good: 5, neutral: 2.5})}
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Cash Flow Metrics</h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            <MetricCard 
+                              title="Operating Cash Flow" 
+                              value={analysis.rawValues.operatingCashFlow}
+                            />
+                            <MetricCard 
+                              title="Free Cash Flow" 
+                              value={analysis.rawValues.freeCashFlow}
+                            />
+                            <MetricCard 
+                              title="FCF Margin" 
+                              value={analysis.cashFlow.fcfMargin} 
+                              format="percent"
+                              status={getHealthStatus(analysis.cashFlow.fcfMargin, {good: 15, neutral: 8})}
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Per Share Metrics</h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                            <MetricCard 
+                              title="EPS" 
+                              value={analysis.perShare.eps}
+                            />
+                            <MetricCard 
+                              title="Book Value Per Share" 
+                              value={analysis.perShare.bookValuePerShare}
+                            />
+                            <MetricCard 
+                              title="Cash Per Share" 
+                              value={analysis.perShare.cashPerShare}
+                            />
+                            <MetricCard 
+                              title="FCF Per Share" 
+                              value={analysis.perShare.fcfPerShare}
+                            />
                           </div>
                         </div>
                       </div>
-                      
-                      {/* Valuation Summary */}
-                      {valuations.summary.averageEquityValue && (
-                        <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-6">
-                          <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Valuation Summary</h4>
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    )}
+
+                    {activeTab === 'fairvalue' && fairValue && (
+                      <div className="space-y-6">
+                        {/* Stock Price Input */}
+                        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                          <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-4">Current Market Price (Optional)</h3>
+                          <p className="text-xs text-gray-500 mb-4 font-light">
+                            Enter the current market price to calculate upside/downside potential
+                          </p>
+                          <div className="flex items-center gap-4">
+                            <span className="text-gray-500 text-sm">$</span>
+                            <input
+                              type="number"
+                              value={currentStockPrice}
+                              onChange={(e) => setCurrentStockPrice(e.target.value)}
+                              placeholder="e.g., 39.24"
+                              step="0.01"
+                              className="px-4 py-3 bg-black border border-zinc-800 rounded text-white placeholder-gray-600 focus:border-zinc-700 transition-colors w-48"
+                            />
+                            <span className="text-gray-500 text-sm">per share</span>
+                          </div>
+                        </div>
+
+                        {/* Model Assumptions */}
+                        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                          <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-4">Model Assumptions</h3>
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                             <div>
-                              <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Average Equity Value</p>
-                              <p className="text-3xl font-light text-white">{formatNumber(valuations.summary.averageEquityValue)}</p>
-                              <p className="text-xs text-gray-600 mt-1">Based on {valuations.summary.validationCount} applicable methods</p>
+                              <span className="text-gray-600">Risk-Free Rate:</span>
+                              <span className="text-white ml-2">{formatPercent(fairValue.assumptions.riskFreeRate)}</span>
                             </div>
                             <div>
-                              <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Average Per Share Value</p>
-                              <p className="text-3xl font-light text-white">{valuations.summary.averagePerShare ? formatNumber(valuations.summary.averagePerShare) : 'N/A'}</p>
+                              <span className="text-gray-600">Market Risk Premium:</span>
+                              <span className="text-white ml-2">{formatPercent(fairValue.assumptions.marketRiskPremium)}</span>
+                            </div>
+                            <div>
+                              <span className="text-gray-600">Beta:</span>
+                              <span className="text-white ml-2">{formatRatio(fairValue.assumptions.beta)}</span>
+                            </div>
+                            <div>
+                              <span className="text-gray-600">Cost of Equity:</span>
+                              <span className="text-white ml-2">{formatPercent(fairValue.assumptions.costOfEquity)}</span>
+                            </div>
+                            <div>
+                              <span className="text-gray-600">WACC:</span>
+                              <span className="text-white ml-2">{formatPercent(fairValue.assumptions.wacc)}</span>
+                            </div>
+                            <div>
+                              <span className="text-gray-600">Tax Rate:</span>
+                              <span className="text-white ml-2">{formatPercent(fairValue.assumptions.taxRate)}</span>
                             </div>
                           </div>
-                          {valuations.summary.warning && (
-                            <div className="mt-4 p-3 bg-yellow-950 border border-yellow-900 rounded">
-                              <p className="text-sm text-yellow-400 font-light">{valuations.summary.warning}</p>
+                        </div>
+
+                        {/* Lynch Fair Value */}
+                        {fairValue.lynch.applicable ? (
+                          <FairValueCard title="Peter Lynch Fair Value" method="Growth Investing">
+                            <div className="space-y-4">
+                              <div className="formula-box">
+                                <div className="mb-2 text-gray-500 text-xs uppercase tracking-wider">Formula:</div>
+                                <div>{fairValue.lynch.formula}</div>
+                              </div>
+                              
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Fair Value Per Share</p>
+                                  <p className="text-4xl font-light text-white">{formatNumber(fairValue.lynch.fairValue)}</p>
+                                </div>
+                                {currentStockPrice && fairValue.lynch.fairValue && (
+                                  <div>
+                                    <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Upside / Downside</p>
+                                    <p className={`text-4xl font-light ${
+                                      ((fairValue.lynch.fairValue - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100) > 0 
+                                        ? 'upside-positive' 
+                                        : 'upside-negative'
+                                    }`}>
+                                      {((fairValue.lynch.fairValue - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100).toFixed(1)}%
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="border-t border-zinc-800 pt-4">
+                                <div className="grid grid-cols-3 gap-4 text-sm">
+                                  <div>
+                                    <span className="text-gray-500">EPS:</span>
+                                    <span className="text-white ml-2">${formatRatio(fairValue.lynch.eps)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Growth Rate:</span>
+                                    <span className="text-white ml-2">{formatPercent(fairValue.lynch.growthRate)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Dividend Yield:</span>
+                                    <span className="text-white ml-2">{formatPercent(fairValue.lynch.dividendYield)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </FairValueCard>
+                        ) : (
+                          <div className="fair-value-card rounded-lg p-6 border-red-900">
+                            <h4 className="text-lg font-light text-red-400 mb-2">Peter Lynch Fair Value - Not Applicable</h4>
+                            <p className="text-sm text-gray-400 font-light">
+                              Requires positive EPS and positive growth rate.
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Graham Number */}
+                        {fairValue.graham.applicable ? (
+                          <FairValueCard title="Benjamin Graham Number" method="Value Investing">
+                            <div className="space-y-4">
+                              <div className="formula-box">
+                                <div className="mb-2 text-gray-500 text-xs uppercase tracking-wider">Formula:</div>
+                                <div>{fairValue.graham.formula}</div>
+                              </div>
+                              
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Graham Number</p>
+                                  <p className="text-4xl font-light text-white">{formatNumber(fairValue.graham.number)}</p>
+                                </div>
+                                {currentStockPrice && fairValue.graham.number && (
+                                  <div>
+                                    <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Upside / Downside</p>
+                                    <p className={`text-4xl font-light ${
+                                      ((fairValue.graham.number - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100) > 0 
+                                        ? 'upside-positive' 
+                                        : 'upside-negative'
+                                    }`}>
+                                      {((fairValue.graham.number - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100).toFixed(1)}%
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="border-t border-zinc-800 pt-4">
+                                <div className="grid grid-cols-2 gap-4 text-sm">
+                                  <div>
+                                    <span className="text-gray-500">EPS:</span>
+                                    <span className="text-white ml-2">${formatRatio(fairValue.graham.eps)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Book Value/Share:</span>
+                                    <span className="text-white ml-2">{formatNumber(fairValue.graham.bookValuePerShare)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </FairValueCard>
+                        ) : (
+                          <div className="fair-value-card rounded-lg p-6 border-red-900">
+                            <h4 className="text-lg font-light text-red-400 mb-2">Graham Number - Not Applicable</h4>
+                            <p className="text-sm text-gray-400 font-light">
+                              Requires positive EPS and positive book value per share.
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Dividend Discount Model */}
+                        {fairValue.ddm.applicable ? (
+                          <FairValueCard title="Dividend Discount Model (Gordon Growth)" method="Income Investing">
+                            <div className="space-y-4">
+                              <div className="formula-box">
+                                <div className="mb-2 text-gray-500 text-xs uppercase tracking-wider">Formula:</div>
+                                <div>{fairValue.ddm.formula}</div>
+                                <div className="text-xs text-gray-600 mt-2">Where D₁ = next year's dividend, r = required return, g = growth rate</div>
+                              </div>
+                              
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Fair Value Per Share</p>
+                                  <p className="text-4xl font-light text-white">{formatNumber(fairValue.ddm.fairValue)}</p>
+                                </div>
+                                {currentStockPrice && fairValue.ddm.fairValue && (
+                                  <div>
+                                    <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Upside / Downside</p>
+                                    <p className={`text-4xl font-light ${
+                                      ((fairValue.ddm.fairValue - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100) > 0 
+                                        ? 'upside-positive' 
+                                        : 'upside-negative'
+                                    }`}>
+                                      {((fairValue.ddm.fairValue - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100).toFixed(1)}%
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="border-t border-zinc-800 pt-4">
+                                <div className="grid grid-cols-2 gap-4 text-sm">
+                                  <div>
+                                    <span className="text-gray-500">Current Dividend:</span>
+                                    <span className="text-white ml-2">{formatNumber(fairValue.ddm.currentDividend)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Next Year Dividend:</span>
+                                    <span className="text-white ml-2">{formatNumber(fairValue.ddm.nextYearDividend)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Growth Rate:</span>
+                                    <span className="text-white ml-2">{formatPercent(fairValue.ddm.growthRate)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Required Return:</span>
+                                    <span className="text-white ml-2">{formatPercent(fairValue.ddm.requiredReturn)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </FairValueCard>
+                        ) : (
+                          <div className="fair-value-card rounded-lg p-6 border-zinc-800">
+                            <h4 className="text-lg font-light text-gray-400 mb-2">Dividend Discount Model - Not Applicable</h4>
+                            <p className="text-sm text-gray-400 font-light">
+                              {fairValue.ddm.reason}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Earnings Power Value */}
+                        {fairValue.epv.applicable ? (
+                          <FairValueCard title="Earnings Power Value (EPV)" method="Greenwald Value Method">
+                            <div className="space-y-4">
+                              <div className="formula-box">
+                                <div className="mb-2 text-gray-500 text-xs uppercase tracking-wider">Formula:</div>
+                                <div>{fairValue.epv.formula}</div>
+                                <div className="text-xs text-gray-600 mt-2">Adjusted Earnings = Operating Income × (1 - Tax Rate)</div>
+                              </div>
+                              
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">EPV Per Share</p>
+                                  <p className="text-4xl font-light text-white">{formatNumber(fairValue.epv.perShare)}</p>
+                                </div>
+                                {currentStockPrice && fairValue.epv.perShare && (
+                                  <div>
+                                    <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Upside / Downside</p>
+                                    <p className={`text-4xl font-light ${
+                                      ((fairValue.epv.perShare - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100) > 0 
+                                        ? 'upside-positive' 
+                                        : 'upside-negative'
+                                    }`}>
+                                      {((fairValue.epv.perShare - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100).toFixed(1)}%
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="border-t border-zinc-800 pt-4">
+                                <div className="grid grid-cols-2 gap-4 text-sm">
+                                  <div>
+                                    <span className="text-gray-500">Operating Income:</span>
+                                    <span className="text-white ml-2">{formatNumber(fairValue.epv.operatingIncome)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Adjusted Earnings:</span>
+                                    <span className="text-white ml-2">{formatNumber(fairValue.epv.adjustedEarnings)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">WACC:</span>
+                                    <span className="text-white ml-2">{formatPercent(fairValue.epv.wacc)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Total EPV:</span>
+                                    <span className="text-white ml-2">{formatNumber(fairValue.epv.totalEPV)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </FairValueCard>
+                        ) : (
+                          <div className="fair-value-card rounded-lg p-6 border-zinc-800">
+                            <h4 className="text-lg font-light text-gray-400 mb-2">Earnings Power Value - Not Applicable</h4>
+                            <p className="text-sm text-gray-400 font-light">
+                              {fairValue.epv.reason}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Net Current Asset Value (NCAV) */}
+                        {fairValue.ncav.applicable ? (
+                          <FairValueCard title="Net Current Asset Value (NCAV)" method="Graham's Net-Net">
+                            <div className="space-y-4">
+                              <div className="formula-box">
+                                <div className="mb-2 text-gray-500 text-xs uppercase tracking-wider">Formula:</div>
+                                <div>{fairValue.ncav.formula}</div>
+                              </div>
+                              
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">NCAV Per Share</p>
+                                  <p className="text-4xl font-light text-white">{formatNumber(fairValue.ncav.perShare)}</p>
+                                </div>
+                                {currentStockPrice && fairValue.ncav.perShare && (
+                                  <div>
+                                    <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Upside / Downside</p>
+                                    <p className={`text-4xl font-light ${
+                                      ((fairValue.ncav.perShare - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100) > 0 
+                                        ? 'upside-positive' 
+                                        : 'upside-negative'
+                                    }`}>
+                                      {((fairValue.ncav.perShare - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100).toFixed(1)}%
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="border-t border-zinc-800 pt-4">
+                                <div className="grid grid-cols-2 gap-4 text-sm">
+                                  <div>
+                                    <span className="text-gray-500">Current Assets:</span>
+                                    <span className="text-white ml-2">{formatNumber(fairValue.ncav.currentAssets)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Total Liabilities:</span>
+                                    <span className="text-white ml-2">{formatNumber(fairValue.ncav.totalLiabilities)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                              
+                              <div className="p-3 bg-yellow-950 border border-yellow-900 rounded">
+                                <p className="text-xs text-yellow-400 font-light">{fairValue.ncav.description}</p>
+                              </div>
+                            </div>
+                          </FairValueCard>
+                        ) : (
+                          <div className="fair-value-card rounded-lg p-6 border-zinc-800">
+                            <h4 className="text-lg font-light text-gray-400 mb-2">NCAV - Not Applicable</h4>
+                            <p className="text-sm text-gray-400 font-light">
+                              {fairValue.ncav.reason}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* PEG Ratio Fair Value */}
+                        {fairValue.peg.applicable ? (
+                          <FairValueCard title="PEG Ratio Fair Value" method="Growth at Reasonable Price (GARP)">
+                            <div className="space-y-4">
+                              <div className="formula-box">
+                                <div className="mb-2 text-gray-500 text-xs uppercase tracking-wider">Formula:</div>
+                                <div>{fairValue.peg.formula}</div>
+                              </div>
+                              
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Fair Value Per Share</p>
+                                  <p className="text-4xl font-light text-white">{formatNumber(fairValue.peg.fairValue)}</p>
+                                </div>
+                                {currentStockPrice && fairValue.peg.fairValue && (
+                                  <div>
+                                    <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Upside / Downside</p>
+                                    <p className={`text-4xl font-light ${
+                                      ((fairValue.peg.fairValue - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100) > 0 
+                                        ? 'upside-positive' 
+                                        : 'upside-negative'
+                                    }`}>
+                                      {((fairValue.peg.fairValue - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100).toFixed(1)}%
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="border-t border-zinc-800 pt-4">
+                                <div className="grid grid-cols-3 gap-4 text-sm">
+                                  <div>
+                                    <span className="text-gray-500">EPS:</span>
+                                    <span className="text-white ml-2">${formatRatio(fairValue.peg.eps)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Growth Rate:</span>
+                                    <span className="text-white ml-2">{formatPercent(fairValue.peg.growthRate)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Implied P/E:</span>
+                                    <span className="text-white ml-2">{formatRatio(fairValue.peg.impliedPE)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </FairValueCard>
+                        ) : (
+                          <div className="fair-value-card rounded-lg p-6 border-zinc-800">
+                            <h4 className="text-lg font-light text-gray-400 mb-2">PEG Fair Value - Not Applicable</h4>
+                            <p className="text-sm text-gray-400 font-light">
+                              {fairValue.peg.reason}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Residual Income Model */}
+                        {fairValue.residualIncome.applicable ? (
+                          <FairValueCard title="Residual Income Model" method="Excess Return Valuation">
+                            <div className="space-y-4">
+                              <div className="formula-box">
+                                <div className="mb-2 text-gray-500 text-xs uppercase tracking-wider">Formula:</div>
+                                <div>{fairValue.residualIncome.formula}</div>
+                                <div className="text-xs text-gray-600 mt-2">Residual Income = Net Income - (Equity × Cost of Equity)</div>
+                              </div>
+                              
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Fair Value Per Share</p>
+                                  <p className="text-4xl font-light text-white">{formatNumber(fairValue.residualIncome.perShare)}</p>
+                                </div>
+                                {currentStockPrice && fairValue.residualIncome.perShare && (
+                                  <div>
+                                    <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Upside / Downside</p>
+                                    <p className={`text-4xl font-light ${
+                                      ((fairValue.residualIncome.perShare - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100) > 0 
+                                        ? 'upside-positive' 
+                                        : 'upside-negative'
+                                    }`}>
+                                      {((fairValue.residualIncome.perShare - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100).toFixed(1)}%
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="border-t border-zinc-800 pt-4">
+                                <div className="grid grid-cols-2 gap-4 text-sm">
+                                  <div>
+                                    <span className="text-gray-500">Book Value/Share:</span>
+                                    <span className="text-white ml-2">{formatNumber(fairValue.residualIncome.bookValuePerShare)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Residual Income:</span>
+                                    <span className="text-white ml-2">{formatNumber(fairValue.residualIncome.residualIncome)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">PV Residual Income:</span>
+                                    <span className="text-white ml-2">{formatNumber(fairValue.residualIncome.pvResidualIncome)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Cost of Equity:</span>
+                                    <span className="text-white ml-2">{formatPercent(fairValue.residualIncome.costOfEquity)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </FairValueCard>
+                        ) : (
+                          <div className="fair-value-card rounded-lg p-6 border-zinc-800">
+                            <h4 className="text-lg font-light text-gray-400 mb-2">Residual Income Model - Not Applicable</h4>
+                            <p className="text-sm text-gray-400 font-light">
+                              {fairValue.residualIncome.reason}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* P/E Based Fair Value */}
+                        {fairValue.peBased.applicable ? (
+                          <FairValueCard title="P/E Based Fair Value" method="Multiple Valuation">
+                            <div className="space-y-4">
+                              <div className="formula-box">
+                                <div className="mb-2 text-gray-500 text-xs uppercase tracking-wider">Formula:</div>
+                                <div>{fairValue.peBased.formula}</div>
+                                <div className="text-xs text-gray-600 mt-2">Method: {fairValue.peBased.method}</div>
+                              </div>
+                              
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Fair Value Per Share</p>
+                                  <p className="text-4xl font-light text-white">{formatNumber(fairValue.peBased.fairValue)}</p>
+                                </div>
+                                {currentStockPrice && fairValue.peBased.fairValue && (
+                                  <div>
+                                    <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Upside / Downside</p>
+                                    <p className={`text-4xl font-light ${
+                                      ((fairValue.peBased.fairValue - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100) > 0 
+                                        ? 'upside-positive' 
+                                        : 'upside-negative'
+                                    }`}>
+                                      {((fairValue.peBased.fairValue - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100).toFixed(1)}%
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="border-t border-zinc-800 pt-4">
+                                <div className="grid grid-cols-2 gap-4 text-sm">
+                                  <div>
+                                    <span className="text-gray-500">EPS:</span>
+                                    <span className="text-white ml-2">${formatRatio(fairValue.peBased.eps)}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-gray-500">Justified P/E:</span>
+                                    <span className="text-white ml-2">{formatRatio(fairValue.peBased.justifiedPE)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </FairValueCard>
+                        ) : (
+                          <div className="fair-value-card rounded-lg p-6 border-zinc-800">
+                            <h4 className="text-lg font-light text-gray-400 mb-2">P/E Based Fair Value - Not Applicable</h4>
+                            <p className="text-sm text-gray-400 font-light">
+                              {fairValue.peBased.reason}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Tangible Book Value */}
+                        {fairValue.tangibleBook.applicable ? (
+                          <FairValueCard title="Tangible Book Value" method="Asset-Based Valuation">
+                            <div className="space-y-4">
+                              <div className="formula-box">
+                                <div className="mb-2 text-gray-500 text-xs uppercase tracking-wider">Formula:</div>
+                                <div>{fairValue.tangibleBook.formula}</div>
+                              </div>
+                              
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                  <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Tangible Book Value/Share</p>
+                                  <p className="text-4xl font-light text-white">{formatNumber(fairValue.tangibleBook.value)}</p>
+                                </div>
+                                {currentStockPrice && fairValue.tangibleBook.value && (
+                                  <div>
+                                    <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Upside / Downside</p>
+                                    <p className={`text-4xl font-light ${
+                                      ((fairValue.tangibleBook.value - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100) > 0 
+                                        ? 'upside-positive' 
+                                        : 'upside-negative'
+                                    }`}>
+                                      {((fairValue.tangibleBook.value - parseFloat(currentStockPrice)) / parseFloat(currentStockPrice) * 100).toFixed(1)}%
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </FairValueCard>
+                        ) : (
+                          <div className="fair-value-card rounded-lg p-6 border-zinc-800">
+                            <h4 className="text-lg font-light text-gray-400 mb-2">Tangible Book Value - Not Applicable</h4>
+                            <p className="text-sm text-gray-400 font-light">
+                              Requires positive tangible equity.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {activeTab === 'valuations' && valuations && (
+                      <div className="space-y-8">
+                        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                          <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Company Profile</h4>
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                            <div>
+                              <span className="text-gray-600">Stage:</span>
+                              <span className={`ml-2 font-medium ${
+                                valuations.companyStage.stage.includes('High-Growth') ? 'text-blue-400' :
+                                valuations.companyStage.stage.includes('Early-Stage') ? 'text-yellow-400' : 'text-green-400'
+                              }`}>
+                                {valuations.companyStage.stage}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-gray-600">Profitable:</span>
+                              <span className={`ml-2 ${valuations.companyStage.isProfitable ? 'text-green-400' : 'text-red-400'}`}>
+                                {valuations.companyStage.isProfitable ? 'Yes' : 'No'}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-gray-600">Positive FCF:</span>
+                              <span className={`ml-2 ${valuations.companyStage.hasPositiveFCF ? 'text-green-400' : 'text-red-400'}`}>
+                                {valuations.companyStage.hasPositiveFCF ? 'Yes' : 'No'}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-gray-600">Revenue Growth:</span>
+                              <span className={`ml-2 ${valuations.companyStage.revenueGrowth > 20 ? 'text-green-400' : 'text-gray-400'}`}>
+                                {formatPercent(valuations.companyStage.revenueGrowth)}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        
+                        {valuations.summary.averageEquityValue && (
+                          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Valuation Summary</h4>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                              <div>
+                                <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Average Equity Value</p>
+                                <p className="text-3xl font-light text-white">{formatNumber(valuations.summary.averageEquityValue)}</p>
+                                <p className="text-xs text-gray-600 mt-1">Based on {valuations.summary.validationCount} applicable methods</p>
+                              </div>
+                              <div>
+                                <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Average Per Share Value</p>
+                                <p className="text-3xl font-light text-white">{valuations.summary.averagePerShare ? formatNumber(valuations.summary.averagePerShare) : 'N/A'}</p>
+                              </div>
+                            </div>
+                            {valuations.summary.warning && (
+                              <div className="mt-4 p-3 bg-yellow-950 border border-yellow-900 rounded">
+                                <p className="text-sm text-yellow-400 font-light">{valuations.summary.warning}</p>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                          {valuations.dcf && (
+                            <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                              <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">DCF Valuation</h4>
+                              <p className="text-xs text-gray-600 mb-4 font-light">{valuations.dcf.description}</p>
+                              <div className="space-y-3">
+                                <div className="flex justify-between items-center">
+                                  <span className="text-xs text-gray-500 uppercase tracking-wider">Equity Value</span>
+                                  <span className="text-lg font-light text-white">{formatNumber(valuations.dcf.equityValue)}</span>
+                                </div>
+                                <div className="flex justify-between items-center">
+                                  <span className="text-xs text-gray-500 uppercase tracking-wider">Per Share</span>
+                                  <span className="text-lg font-light text-white">{valuations.dcf.perShare ? formatNumber(valuations.dcf.perShare) : 'N/A'}</span>
+                                </div>
+                              </div>
                             </div>
                           )}
-                        </div>
-                      )}
 
-                      {/* Individual Valuation Methods */}
-                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        {/* Book Value */}
-                        {valuations.bookValue && (
-                          <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                            <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">Book Value Method</h4>
+                          {valuations.revenueMultiple?.applicable && (
+                            <div className="bg-zinc-900 border border-blue-900 rounded-lg p-6">
+                              <h4 className="text-sm font-light text-blue-400 mb-3 uppercase tracking-wide">Revenue Multiple</h4>
+                              <p className="text-xs text-gray-600 mb-4 font-light">{valuations.revenueMultiple.description}</p>
+                              <div className="space-y-3">
+                                <div className="flex justify-between items-center">
+                                  <span className="text-xs text-gray-500 uppercase tracking-wider">Equity Value</span>
+                                  <span className="text-lg font-light text-white">{formatNumber(valuations.revenueMultiple.equityValue)}</span>
+                                </div>
+                                <div className="flex justify-between items-center">
+                                  <span className="text-xs text-gray-500 uppercase tracking-wider">Per Share</span>
+                                  <span className="text-lg font-light text-white">{valuations.revenueMultiple.perShare ? formatNumber(valuations.revenueMultiple.perShare) : 'N/A'}</span>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {valuations.comparables && (
+                            <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                              <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">Comparable Multiples</h4>
+                              <p className="text-xs text-gray-600 mb-4 font-light">{valuations.comparables.description}</p>
+                              <div className="space-y-3">
+                                <div className="flex justify-between items-center">
+                                  <span className="text-xs text-gray-500 uppercase tracking-wider">P/E Valuation</span>
+                                  <span className="text-lg font-light text-white">{formatNumber(valuations.comparables.peValuation)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">Book Value</h4>
                             <p className="text-xs text-gray-600 mb-4 font-light">{valuations.bookValue.description}</p>
                             <div className="space-y-3">
                               <div className="flex justify-between items-center">
@@ -1948,172 +2857,14 @@
                               </div>
                             </div>
                           </div>
-                        )}
-
-                        {/* Adjusted Net Asset */}
-                        {valuations.adjustedNetAsset && (
-                          <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                            <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">Adjusted Net Asset Value</h4>
-                            <p className="text-xs text-gray-600 mb-4 font-light">{valuations.adjustedNetAsset.description}</p>
-                            <div className="space-y-3">
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Total Value</span>
-                                <span className="text-lg font-light text-white">{formatNumber(valuations.adjustedNetAsset.total)}</span>
-                              </div>
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Per Share</span>
-                                <span className="text-lg font-light text-white">{valuations.adjustedNetAsset.perShare ? formatNumber(valuations.adjustedNetAsset.perShare) : 'N/A'}</span>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
-                        {/* DCF Valuation */}
-                        {valuations.dcf && (
-                          <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                            <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">DCF Valuation</h4>
-                            <p className="text-xs text-gray-600 mb-4 font-light">{valuations.dcf.description}</p>
-                            {valuations.dcf.isProjected && (
-                              <div className="mb-3 p-2 bg-blue-950 border border-blue-900 rounded">
-                                <p className="text-xs text-blue-400 font-light">Using projected positive FCF based on revenue growth</p>
-                              </div>
-                            )}
-                            <div className="space-y-3">
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Enterprise Value</span>
-                                <span className="text-lg font-light text-white">{formatNumber(valuations.dcf.enterpriseValue)}</span>
-                              </div>
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Equity Value</span>
-                                <span className="text-lg font-light text-white">{formatNumber(valuations.dcf.equityValue)}</span>
-                              </div>
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Per Share</span>
-                                <span className="text-lg font-light text-white">{valuations.dcf.perShare ? formatNumber(valuations.dcf.perShare) : 'N/A'}</span>
-                              </div>
-                              <div className="pt-3 border-t border-zinc-800 text-xs text-gray-600 space-y-1">
-                                <div className="flex justify-between">
-                                  <span>WACC:</span>
-                                  <span>{formatPercent(valuations.dcf.wacc)}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                  <span>Terminal Growth:</span>
-                                  <span>{formatPercent(valuations.dcf.terminalGrowth)}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                  <span>PV of FCF:</span>
-                                  <span>{formatNumber(valuations.dcf.pvFCF)}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                  <span>PV of Terminal:</span>
-                                  <span>{formatNumber(valuations.dcf.pvTerminalValue)}</span>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Revenue Multiple (for unprofitable companies) */}
-                        {valuations.revenueMultiple?.applicable && (
-                          <div className="bg-zinc-950 border border-blue-900 rounded-lg p-6">
-                            <h4 className="text-sm font-light text-blue-400 mb-3 uppercase tracking-wide">Revenue Multiple Valuation</h4>
-                            <p className="text-xs text-gray-600 mb-4 font-light">{valuations.revenueMultiple.description}</p>
-                            <div className="space-y-3">
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Revenue Multiple</span>
-                                <span className="text-lg font-light text-blue-400">{formatRatio(valuations.revenueMultiple.multiple)}x</span>
-                              </div>
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Enterprise Value</span>
-                                <span className="text-lg font-light text-white">{formatNumber(valuations.revenueMultiple.enterpriseValue)}</span>
-                              </div>
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Equity Value</span>
-                                <span className="text-lg font-light text-white">{formatNumber(valuations.revenueMultiple.equityValue)}</span>
-                              </div>
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Per Share</span>
-                                <span className="text-lg font-light text-white">{valuations.revenueMultiple.perShare ? formatNumber(valuations.revenueMultiple.perShare) : 'N/A'}</span>
-                              </div>
-                              <div className="pt-3 border-t border-zinc-800 text-xs text-gray-600">
-                                <div className="flex justify-between">
-                                  <span>Revenue Growth:</span>
-                                  <span>{formatPercent(valuations.revenueMultiple.revenueGrowth)}</span>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Excess Earnings */}
-                        {valuations.excessEarnings && (
-                          <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                            <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">Excess Earnings Method</h4>
-                            <p className="text-xs text-gray-600 mb-4 font-light">{valuations.excessEarnings.description}</p>
-                            <div className="space-y-3">
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Total Value</span>
-                                <span className="text-lg font-light text-white">{formatNumber(valuations.excessEarnings.total)}</span>
-                              </div>
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Tangible Assets</span>
-                                <span className="text-sm font-light text-gray-400">{formatNumber(valuations.excessEarnings.tangibleValue)}</span>
-                              </div>
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Intangible Value</span>
-                                <span className="text-sm font-light text-gray-400">{formatNumber(valuations.excessEarnings.intangibleValue)}</span>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Comparable Multiples */}
-                        {valuations.comparables && (
-                          <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                            <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">Comparable Multiples</h4>
-                            <p className="text-xs text-gray-600 mb-4 font-light">{valuations.comparables.description}</p>
-                            <div className="space-y-3">
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">P/E Valuation ({valuations.comparables.assumedPE}x)</span>
-                                <span className="text-lg font-light text-white">{formatNumber(valuations.comparables.peValuation)}</span>
-                              </div>
-                              {valuations.comparables.applicable && valuations.comparables.evToEbitdaValuation && (
-                                <div className="flex justify-between items-center">
-                                  <span className="text-xs text-gray-500 uppercase tracking-wider">EV/EBITDA ({valuations.comparables.assumedEVToEBITDA}x)</span>
-                                  <span className="text-lg font-light text-white">{formatNumber(valuations.comparables.evToEbitdaValuation)}</span>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        )}
-
-                        {/* DDM (if applicable) */}
-                        {valuations.ddm && (
-                          <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                            <h4 className="text-sm font-light text-gray-400 mb-3 uppercase tracking-wide">Dividend Discount Model</h4>
-                            <p className="text-xs text-gray-600 mb-4 font-light">{valuations.ddm.description}</p>
-                            <div className="space-y-3">
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Value Per Share</span>
-                                <span className="text-lg font-light text-white">{formatNumber(valuations.ddm.perShare)}</span>
-                              </div>
-                              <div className="flex justify-between items-center">
-                                <span className="text-xs text-gray-500 uppercase tracking-wider">Dividend Yield</span>
-                                <span className="text-sm font-light text-gray-400">{formatPercent(valuations.ddm.dividendYield)}</span>
-                              </div>
-                            </div>
-                          </div>
-                        )}
+                        </div>
                       </div>
-                    </div>
+                    )}
 
-                    {/* LBO MODEL SECTION */}
-                    {lboModel && (
-                      <div className="mb-8 section-divider">
-                        <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">Leveraged Buyout Analysis</h3>
-                        
+                    {activeTab === 'lbo' && lboModel && (
+                      <div className="space-y-8">
                         {!lboModel.applicable ? (
-                          <div className="bg-zinc-950 border border-red-900 rounded-lg p-6">
+                          <div className="bg-zinc-900 border border-red-900 rounded-lg p-6">
                             <h4 className="text-sm font-light text-red-400 mb-3 uppercase tracking-wide">LBO Not Applicable</h4>
                             <p className="text-gray-400 mb-4 font-light">{lboModel.reason}</p>
                             <div className="space-y-2 text-sm text-gray-500 mb-4">
@@ -2123,21 +2874,14 @@
                                   <span className={lboModel.ebitda > 0 ? 'text-green-400' : 'text-red-400'}>{formatNumber(lboModel.ebitda)}</span>
                                 </div>
                               )}
-                              {lboModel.fcf !== undefined && (
-                                <div className="flex justify-between">
-                                  <span>Current FCF:</span>
-                                  <span className={lboModel.fcf > 0 ? 'text-green-400' : 'text-red-400'}>{formatNumber(lboModel.fcf)}</span>
-                                </div>
-                              )}
                             </div>
-                            <div className="p-3 bg-zinc-900 border border-zinc-800 rounded">
+                            <div className="p-3 bg-zinc-800 border border-zinc-700 rounded">
                               <p className="text-xs text-gray-400 font-light">{lboModel.suggestion}</p>
                             </div>
                           </div>
                         ) : (
                           <>
-                            {/* LBO Returns Summary */}
-                            <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-6">
+                            <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
                               <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Investment Returns</h4>
                               <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
                                 <div>
@@ -2159,18 +2903,12 @@
                               </div>
                             </div>
 
-                            {/* LBO Structure */}
-                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-                              {/* Entry */}
-                              <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                                <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Transaction Entry</h4>
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                              <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                                <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Entry</h4>
                                 <div className="space-y-3">
                                   <div className="flex justify-between items-center">
-                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Entry EBITDA</span>
-                                    <span className="text-base font-light text-white">{formatNumber(lboModel.entry.ebitda)}</span>
-                                  </div>
-                                  <div className="flex justify-between items-center">
-                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Purchase Price ({formatRatio(lboModel.assumptions.purchaseMultiple)}x)</span>
+                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Purchase Price</span>
                                     <span className="text-base font-light text-white">{formatNumber(lboModel.entry.purchasePrice)}</span>
                                   </div>
                                   <div className="flex justify-between items-center">
@@ -2181,23 +2919,14 @@
                                     <span className="text-xs text-gray-500 uppercase tracking-wider">Equity Investment</span>
                                     <span className="text-base font-light text-white">{formatNumber(lboModel.entry.equityInvestment)}</span>
                                   </div>
-                                  <div className="flex justify-between items-center">
-                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Debt/Equity Ratio</span>
-                                    <span className="text-base font-light text-gray-400">{formatRatio(lboModel.entry.debtToEquity)}</span>
-                                  </div>
                                 </div>
                               </div>
 
-                              {/* Exit */}
-                              <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                                <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Transaction Exit (Year {lboModel.assumptions.holdingPeriod})</h4>
+                              <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                                <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Exit (Year {lboModel.assumptions.holdingPeriod})</h4>
                                 <div className="space-y-3">
                                   <div className="flex justify-between items-center">
-                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Exit EBITDA</span>
-                                    <span className="text-base font-light text-white">{formatNumber(lboModel.exit.ebitda)}</span>
-                                  </div>
-                                  <div className="flex justify-between items-center">
-                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Exit EV ({formatRatio(lboModel.assumptions.exitMultiple)}x)</span>
+                                    <span className="text-xs text-gray-500 uppercase tracking-wider">Exit EV</span>
                                     <span className="text-base font-light text-white">{formatNumber(lboModel.exit.enterpriseValue)}</span>
                                   </div>
                                   <div className="flex justify-between items-center">
@@ -2212,44 +2941,8 @@
                               </div>
                             </div>
 
-                            {/* Assumptions */}
-                            <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6 mb-6">
-                              <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Model Assumptions</h4>
-                              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
-                                <div>
-                                  <span className="text-gray-600">Purchase Multiple:</span>
-                                  <span className="text-white ml-2">{formatRatio(lboModel.assumptions.purchaseMultiple)}x</span>
-                                </div>
-                                <div>
-                                  <span className="text-gray-600">Exit Multiple:</span>
-                                  <span className="text-white ml-2">{formatRatio(lboModel.assumptions.exitMultiple)}x</span>
-                                </div>
-                                <div>
-                                  <span className="text-gray-600">Debt Multiple:</span>
-                                  <span className="text-white ml-2">{formatRatio(lboModel.assumptions.debtMultiple)}x</span>
-                                </div>
-                                <div>
-                                  <span className="text-gray-600">Interest Rate:</span>
-                                  <span className="text-white ml-2">{formatPercent(lboModel.assumptions.interestRate)}</span>
-                                </div>
-                                <div>
-                                  <span className="text-gray-600">Equity %:</span>
-                                  <span className="text-white ml-2">{formatPercent(lboModel.assumptions.equityContribution)}</span>
-                                </div>
-                                <div>
-                                  <span className="text-gray-600">Hold Period:</span>
-                                  <span className="text-white ml-2">{lboModel.assumptions.holdingPeriod} years</span>
-                                </div>
-                                <div>
-                                  <span className="text-gray-600">Revenue Growth:</span>
-                                  <span className="text-white ml-2">{formatPercent(lboModel.assumptions.revenueGrowth)}</span>
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Projection Table */}
-                            <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                              <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">5-Year Projections & Debt Paydown</h4>
+                            <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                              <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">5-Year Projections</h4>
                               <div className="overflow-x-auto">
                                 <table className="w-full text-sm">
                                   <thead>
@@ -2258,8 +2951,6 @@
                                       <th className="text-right text-xs text-gray-500 uppercase tracking-wider py-2">Revenue</th>
                                       <th className="text-right text-xs text-gray-500 uppercase tracking-wider py-2">EBITDA</th>
                                       <th className="text-right text-xs text-gray-500 uppercase tracking-wider py-2">FCF</th>
-                                      <th className="text-right text-xs text-gray-500 uppercase tracking-wider py-2">Interest</th>
-                                      <th className="text-right text-xs text-gray-500 uppercase tracking-wider py-2">Principal</th>
                                       <th className="text-right text-xs text-gray-500 uppercase tracking-wider py-2">Debt Balance</th>
                                     </tr>
                                   </thead>
@@ -2270,8 +2961,6 @@
                                         <td className="py-2 text-right text-gray-400 font-light">{formatNumber(proj.revenue)}</td>
                                         <td className="py-2 text-right text-gray-400 font-light">{formatNumber(proj.ebitda)}</td>
                                         <td className="py-2 text-right text-gray-400 font-light">{formatNumber(proj.fcf)}</td>
-                                        <td className="py-2 text-right text-gray-400 font-light">{formatNumber(proj.interestExpense)}</td>
-                                        <td className="py-2 text-right text-green-500 font-light">{formatNumber(proj.principalPayment)}</td>
                                         <td className="py-2 text-right text-white font-light">{formatNumber(proj.debtBalance)}</td>
                                       </tr>
                                     ))}
@@ -2283,104 +2972,40 @@
                         )}
                       </div>
                     )}
-                  </>
-                )}
 
-                {/* Year-over-Year Comparison */}
-                {yearComparison && (
-                  <div className="mb-8 section-divider">
-                    <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6">
-                      YoY Change ({yearComparison.currentYear} vs {yearComparison.previousYear})
-                    </h3>
-                    <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-                        <div>
-                          <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Revenue Growth</p>
-                          <p className="text-xl font-light">
-                            <YoYChange 
-                              current={yearComparison.current.rawValues.revenue} 
-                              previous={yearComparison.previous.rawValues.revenue}
-                            />
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">Net Income Growth</p>
-                          <p className="text-xl font-light">
-                            <YoYChange 
-                              current={yearComparison.current.rawValues.netIncome} 
-                              previous={yearComparison.previous.rawValues.netIncome}
-                            />
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">EPS Growth</p>
-                          <p className="text-xl font-light">
-                            <YoYChange 
-                              current={yearComparison.current.perShare.eps} 
-                              previous={yearComparison.previous.perShare.eps}
-                            />
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-medium">FCF Growth</p>
-                          <p className="text-xl font-light">
-                            <YoYChange 
-                              current={yearComparison.current.rawValues.freeCashFlow} 
-                              previous={yearComparison.previous.rawValues.freeCashFlow}
-                            />
-                          </p>
+                    {activeTab === 'charts' && availableYears.length > 1 && (
+                      <div className="space-y-6">
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Revenue & Net Income</h4>
+                            <div className="h-64">
+                              <canvas id="revenue-chart"></canvas>
+                            </div>
+                          </div>
+                          
+                          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Profit Margins</h4>
+                            <div className="h-64">
+                              <canvas id="margins-chart"></canvas>
+                            </div>
+                          </div>
+                          
+                          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Cash Flow</h4>
+                            <div className="h-64">
+                              <canvas id="cashflow-chart"></canvas>
+                            </div>
+                          </div>
+                          
+                          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+                            <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Key Ratios</h4>
+                            <div className="h-64">
+                              <canvas id="ratios-chart"></canvas>
+                            </div>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Charts Section */}
-                {availableYears.length > 1 && (
-                  <div className="mb-8">
-                    <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-6 pl-6">Multi-Year Trends</h3>
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                      <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                        <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Revenue & Net Income (Billions)</h4>
-                        <div className="h-64">
-                          <canvas id="revenue-chart"></canvas>
-                        </div>
-                      </div>
-                      
-                      <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                        <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Profit Margins (%)</h4>
-                        <div className="h-64">
-                          <canvas id="margins-chart"></canvas>
-                        </div>
-                      </div>
-                      
-                      <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                        <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Cash Flow (Billions)</h4>
-                        <div className="h-64">
-                          <canvas id="cashflow-chart"></canvas>
-                        </div>
-                      </div>
-                      
-                      <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                        <h4 className="text-sm font-light text-gray-400 mb-4 uppercase tracking-wide">Key Ratios Over Time</h4>
-                        <div className="h-64">
-                          <canvas id="ratios-chart"></canvas>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Summary */}
-                <div className="bg-zinc-950 border border-zinc-900 rounded-lg p-6">
-                  <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-4">Analysis Summary</h3>
-                  <div className="space-y-3 text-gray-400 font-light text-sm leading-relaxed">
-                    <p>Revenue of {formatNumber(analysis.rawValues.revenue)} with {formatPercent(analysis.profitability.netMargin)} net margin</p>
-                    <p>Profitability: ROE of {formatPercent(analysis.profitability.roe)}, ROA of {formatPercent(analysis.profitability.roa)}, and ROIC of {formatPercent(analysis.profitability.roic)}</p>
-                    <p>Liquidity: Current ratio of {formatRatio(analysis.liquidity.currentRatio)} (ability to pay short-term obligations)</p>
-                    <p>Leverage: Debt-to-Equity of {formatRatio(analysis.leverage.debtToEquity)} using interest-bearing debt only</p>
-                    <p>Cash Generation: {formatNumber(analysis.rawValues.freeCashFlow)} in free cash flow ({formatPercent(analysis.cashFlow.fcfMargin)} FCF margin)</p>
-                    <p>Efficiency: Asset turnover of {formatRatio(analysis.efficiency.assetTurnover)} (revenue generated per dollar of assets)</p>
+                    )}
                   </div>
                 </div>
               </>
